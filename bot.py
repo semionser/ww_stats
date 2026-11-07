@@ -179,11 +179,10 @@ def supplies_text(W, S):
         names.update({k: n for k, _, n in s['items']})
     coming = coming_of(S)
     if coming:
-        cov = lambda k, add=0: (W['stock'].get(k, 0) + add) / W['avg7'][k] if W['avg7'].get(k) else None
-        L += ['', '<b>Запас после приёмки</b>']
-        for k in sorted(coming, key=lambda k: (cov(k) is None, cov(k) or 0)):
-            a, b = cov(k), cov(k, coming[k])
-            L.append(f'{e(names[k])}: ' + (f'{a:.0f} → <b>{b:.0f} дн</b>' if a is not None else 'продаж пока нет') + f' (+{coming[k]})')
+        L += ['', '<b>На складе после приёмки, шт</b>']
+        for k in sorted(coming, key=lambda k: (W['stock'].get(k, 0), names[k])):
+            n = W['stock'].get(k, 0)
+            L.append(f'{e(names[k])}: {n} → <b>{n + coming[k]}</b> (+{coming[k]})')
     return '\n'.join(L)
 
 
