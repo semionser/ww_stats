@@ -3,7 +3,7 @@
 Команды в разрешённой группе: /now, /Now, /щас — дашборд; /supply, /поставки — поставки на склады Ozon
 (также с @имя_бота). Каждый день в DAILY_TIME (МСК) присылает итог за вчера.
 Сам пишет в группу (с 08:00 до 24:00 МСК), когда товар закончился, когда запаса осталось меньше 5 дней,
-когда заказов нет 3+ часа, хотя обычно за это время их 4+, и когда у поставки сменился статус.
+когда днём (10:00–22:00) 3+ часа нет заказов, когда цена товара сдвинулась на 10%+ и когда у поставки сменился статус.
 
 Безопасность:
 - работает только в одном чате (ALLOWED_CHAT_ID); из любых других чатов сразу выходит и ничего не отвечает;
@@ -19,7 +19,7 @@ _missing = [k for k in ('TELEGRAM_BOT_TOKEN', 'ALLOWED_CHAT_ID', 'OZON_CLIENT_ID
 if _missing and sys.argv[1:2] != ['test']:
     sys.exit('Не заданы секреты: ' + ', '.join(_missing))
 
-from ozon_data import collect, MSK, NAMES, watch, supplies, supply_states, transit_history, SUPPLY_ACTIVE
+from ozon_data import collect, MSK, NAMES, watch, supplies, supply_states, transit_history, prices, SUPPLY_ACTIVE
 from widget import widget_html
 from render import to_png
 
@@ -34,7 +34,9 @@ COMMANDS = {'/now': 'now', '/щас': 'now', '/supply': 'supply', '/постав
 WORDS = {'щас': 'now', 'ща': 'now', 'сейчас': 'now', 'now': 'now', 'поставки': 'supply', 'supply': 'supply'}
 WATCH_EVERY = 15 * 60          # как часто проверять склад и паузу в заказах, сек.
 LOW_DAYS, LOW_RESET = 5, 7     # тревога, когда запас < 5 дн; снова следим, когда поднялся до 7+
-GAP_HOURS, GAP_USUAL = 3, 4    # нет заказов 3+ ч, а обычно за это время 4+ (по 7 прошлым дням)
+GAP_HOURS = 3                  # тревога, если днём 3+ ч нет ни одного заказа
+DAY_FROM, DAY_TO = 10, 22      # «днём» = с 10:00 до 22:00 МСК; паузу до 10:00 не считаем
+PRICE_JUMP = 0.10              # тревога, если цена товара сдвинулась на 10%+ от последней известной
 QUIET_UNTIL = 8                # с 00:00 до 08:00 МСК бот сам не пишет
 COOLDOWN = 60  # сек.: чаще одного раза в минуту не дёргаем Ozon, повторяем последнюю картинку
 
@@ -366,7 +368,11 @@ def check_alerts():
     W = watch(); now = W['now']
     if now.hour < QUIET_UNTIL:
         return
-    new_zero, new_low, gap = [], [], None
+    new_zero, new_low, gap, jumps = [], [], None, []
+    try:
+        P = prices()
+    except Exception as e:
+        log.warning('prices: %s', type(e).__name__); P = None
     with slock:
         st = load_state()
         first = 'alerts' not in st
@@ -389,10 +395,22 @@ def check_alerts():
                 elif cover >= LOW_RESET:
                     low.discard(k)
         L = W['last']
-        if L and now - L >= datetime.timedelta(hours=GAP_HOURS) and al.get('gap') != L.isoformat():
-            u = usual(W['base'], L, now)
-            if u >= GAP_USUAL:
-                gap = (L, u); al['gap'] = L.isoformat()
+        day0 = now.replace(hour=DAY_FROM, minute=0, second=0, microsecond=0)
+        start = max(L, day0) if L else day0
+        if DAY_FROM <= now.hour < DAY_TO and now - start >= datetime.timedelta(hours=GAP_HOURS) and al.get('gap') != start.isoformat():
+            gap = (L, usual(W['base'], start, now)); al['gap'] = start.isoformat()
+        if P is not None:  # цены: сравниваем с последней известной (после тревоги она становится новой точкой отсчёта)
+            base = al.get('price')
+            if base is None:
+                al['price'] = P  # первый раз запоминаем молча
+            else:
+                for k, v in P.items():
+                    b = base.get(k)
+                    if b and abs(v - b) / b >= PRICE_JUMP:
+                        jumps.append((k, b, v)); base[k] = v
+                    elif not b:
+                        base[k] = v
+                al['price'] = base
         al['zero'], al['low'] = sorted(zero), sorted(low)
         st['alerts'] = al
         save_state(st)
@@ -412,11 +430,23 @@ def check_alerts():
         log.info('stock alert')
         tg('sendMessage', {'chat_id': CHAT_ID, 'text': '\n'.join(T), 'parse_mode': 'HTML'})
     if gap:
-        L, u = gap; m = int((now - L).total_seconds() // 60)
-        since = L.strftime('%H:%M') if L.date() == now.date() else L.strftime('%d.%m %H:%M')
+        L, u = gap
+        if L:
+            m = int((now - L).total_seconds() // 60)
+            since = L.strftime('в %H:%M') if L.date() == now.date() else L.strftime('%d.%m в %H:%M')
+            t = f'⏱ Уже <b>{m // 60} ч {m % 60} мин</b> нет заказов, последний был {since}.'
+        else:
+            t = '⏱ Уже 3+ часа нет заказов.'
+        if u >= 1:
+            t += f' Обычно за это время бывает около {round(u)}.'
         log.info('gap alert')
-        tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML',
-                           'text': f'⏱ Нет заказов с <b>{since}</b>, уже {m // 60} ч {m % 60} мин. Обычно за это время бывает около {round(u)}.'})
+        tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML', 'text': t})
+    if jumps:
+        e = lambda k: html.escape(NAMES.get(k, k))
+        T = ['💸 <b>Цена изменилась</b>']
+        T += [f'{e(k)}: {fmt(b)} → <b>{fmt(v)} ₽</b> ({"+" if v > b else "−"}{abs(v - b) / b * 100:.0f}%)' for k, b, v in sorted(jumps, key=lambda x: (x[2] - x[1]) / x[1])]
+        log.info('price alert')
+        tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML', 'text': '\n'.join(T)})
 
 
 def watcher():

@@ -260,3 +260,19 @@ def transit_history(n=30):
                 if 0.2 < d <= 10:
                     out.append(d)
     return out
+
+
+def prices():
+    """Цена каждого товара на сайте до скидок Ozon: marketing_seller_price (с акциями продавца), иначе price."""
+    out, cur = {}, ''
+    for _ in range(20):
+        d = call('/v5/product/info/prices', {"filter": {"visibility": "ALL"}, "limit": 100, "cursor": cur})
+        for x in d.get('items') or []:
+            p = x.get('price') or {}
+            v = float(p.get('marketing_seller_price') or 0) or float(p.get('price') or 0)
+            if v > 0:
+                out[x['offer_id']] = v
+        cur = d.get('cursor')
+        if not cur or not d.get('items'):
+            break
+    return out
