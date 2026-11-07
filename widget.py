@@ -14,7 +14,7 @@ def widget_html(A, FINAL=False):
     col='var(--text-success)' if d>0 else ('var(--text-muted)' if d==0 else 'var(--text-danger)')
     pct=f' ({"+" if d>=0 else "−"}{abs(d)/prev*100:.0f}%)' if prev and money else ''
     return f'<span style="color:{col}">{sg(d)}{pct}</span> <span style="color:var(--text-muted)">{cmp}</span>'
-  P='background:var(--surface-1);border:1px solid var(--border);border-radius:10px;'
+  P='background:var(--surface-1);border-radius:10px;'
   LB='color:var(--text-secondary);font-size:11px'
   h='<div style="font-family:system-ui,-apple-system,sans-serif;color:var(--text-primary);display:grid;gap:8px;font-variant-numeric:tabular-nums;max-width:440px;font-size:13px">'
   title=f'Ozon · итог за {day}' if FINAL else f'Ozon · {day} {tm} МСК'

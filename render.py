@@ -4,9 +4,9 @@ from playwright.sync_api import sync_playwright
 
 CSS = """
 :root{--text-primary:#1f2328;--text-secondary:#59636e;--text-muted:#8c959f;--text-success:#1a7f37;
---text-warning:#9a6700;--text-danger:#cf222e;--text-accent:#0969da;--surface-1:#f6f8fa;--border:#d0d7de}
+--text-warning:#9a6700;--text-danger:#cf222e;--text-accent:#0969da;--surface-1:#f1f3f5;--border:#d0d7de}
 html,body{margin:0;background:#ffffff}
-#w{padding:12px;width:416px}
+#w{padding:8px;width:416px}
 svg text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 .t{font-size:14px;fill:var(--text-primary)} .ts{font-size:12px;fill:var(--text-secondary)}
 .th{font-size:14px;font-weight:500;fill:var(--text-primary)}
