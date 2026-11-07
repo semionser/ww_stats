@@ -6,6 +6,12 @@ on:
   schedule:
     - cron: "15 */2 * * *"
   workflow_dispatch:
+    inputs:
+      demo:
+        description: "Разово прислать пример сообщения в группу"
+        type: choice
+        options: [none, supply_acceptance]
+        default: none
   push:
     branches: [main]
 permissions:
@@ -42,6 +48,7 @@ jobs:
           PRODUCTS_JSON: ${{ secrets.PRODUCTS_JSON }}
           DAILY_TIME: "09:00"
           SERVE_SECONDS: "20700"
+          DEMO: ${{ inputs.demo }}
         run: python bot.py
       - name: Save state
         if: always()

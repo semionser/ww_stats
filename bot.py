@@ -261,6 +261,23 @@ def check_supplies():
         st = load_state(); st['supplies'] = new; save_state(st)
 
 
+def send_demo_acceptance():
+    """Разовый пример по ручному запуску workflow: как придёт сообщение, когда поставки дойдут до приёмки.
+    Состояние не меняет, настоящие уведомления идут своим чередом."""
+    try:
+        S = supplies(done_max=0)
+        act = [s for s in S if s['state'] != 'COMPLETED']
+        for s in act:
+            s['state'] = 'ACCEPTANCE_AT_STORAGE_WAREHOUSE'
+        text = supplies_text(watch(), S, {s['id']: 'IN_TRANSIT' for s in act})
+    except Exception as e:
+        log.error('demo failed: %s', type(e).__name__)
+        return
+    log.info('demo message')
+    tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML',
+                       'text': '🧪 <i>Пример, статусы выдуманы: так придёт сообщение, когда поставки дойдут до приёмки на складе.</i>\n\n' + text})
+
+
 def send_supplies():
     with lock:
         if not (scache['text'] and time.time() - scache['t'] < COOLDOWN):
@@ -429,6 +446,8 @@ def main():
                 st['join_warned'] = today; save_state(st)
         if warn:
             tg('sendMessage', {'chat_id': CHAT_ID, 'text': '⚠️ Бота сейчас можно добавить в любую группу. Закройте это: @BotFather → /setjoingroups → выбрать бота → Disable.'})
+    if os.environ.get('DEMO') == 'supply_acceptance':
+        send_demo_acceptance()
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=watcher, daemon=True).start()
     log.info('bot started')  # имя бота в лог не пишем: логи Actions публичные
