@@ -273,6 +273,8 @@ def supplies_text(S, changed=None, gone=()):
     for g in gone:
         B = supply_block(g['number'], g['state'], None, True, g['prev'])
         B[-1] += f' · <b>{g["qty"]} шт</b>'
+        if g['state'] == 'COMPLETED':
+            B.append('📄 Проверьте УПД по этой поставке в кабинете Ozon')
         L += [''] + B
     if L:
         L.append('')
