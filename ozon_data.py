@@ -184,7 +184,7 @@ def supplies(done_days=14, done_max=3):
     """Поставки FBO: все незавершённые и до done_max завершённых за последние done_days дней, с составом."""
     ts = lambda s: datetime.datetime.fromisoformat(s[:19]) + MSK if s else None
     active = _supply_ids(SUPPLY_ACTIVE)
-    done = _supply_ids(['COMPLETED'], limit=10, pages=1)
+    done = _supply_ids(['COMPLETED'], limit=10, pages=1) if done_max else []
     orders = []
     ids = active + done
     for i in range(0, len(ids), 50):

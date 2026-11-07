@@ -170,14 +170,12 @@ def coming_of(S):
 def supplies_text(W, S):
     e = html.escape
     act = [s for s in S if s['state'] != 'COMPLETED']
-    done = [s for s in S if s['state'] == 'COMPLETED']
     L = [f'🚚 <b>Поставки в работе: {len(act)}</b>' if act else '🚚 <b>Поставок в работе нет</b>']
     names = {}
     for s in act:
         where = wh(s['dropoff']) + (' → ' + ', '.join(map(wh, s['storage'])) if s['storage'] else '')
         L += ['', f'<b>№{e(s["number"])}</b> · {SUPPLY_RU.get(s["state"], e(s["state"]))}',
-              f'слот {dm(s["slot"])} · {e(where)} · <b>{sum(q for _, q, _ in s["items"])} шт</b>',
-              ', '.join(f'{e(n)} {q}' for _, q, n in sorted(s['items'], key=lambda x: -x[1]))]
+              f'слот {dm(s["slot"])} · {e(where)} · <b>{sum(q for _, q, _ in s["items"])} шт</b>']
         names.update({k: n for k, _, n in s['items']})
     coming = coming_of(S)
     if coming:
@@ -186,10 +184,6 @@ def supplies_text(W, S):
         for k in sorted(coming, key=lambda k: (cov(k) is None, cov(k) or 0)):
             a, b = cov(k), cov(k, coming[k])
             L.append(f'{e(names[k])}: ' + (f'{a:.0f} → <b>{b:.0f} дн</b>' if a is not None else 'продаж пока нет') + f' (+{coming[k]})')
-    if done:
-        done.sort(key=lambda s: s['updated'] or datetime.datetime.min, reverse=True)
-        L += ['', '<b>Недавно приняты</b>']
-        L += [f'{dm(s["updated"])[:5]} · №{e(s["number"])} · {sum(q for _, q, _ in s["items"])} шт' for s in done]
     return '\n'.join(L)
 
 
@@ -197,7 +191,7 @@ def send_supplies():
     with lock:
         if not (scache['text'] and time.time() - scache['t'] < COOLDOWN):
             try:
-                text = supplies_text(watch(), supplies())
+                text = supplies_text(watch(), supplies(done_max=0))
             except Exception as e:
                 log.error('supplies failed: %s', type(e).__name__)
                 tg('sendMessage', {'chat_id': CHAT_ID, 'text': 'Не получилось забрать поставки из Ozon, попробуйте через пару минут.'})
@@ -257,7 +251,7 @@ def check_alerts():
         return
     if new_zero or new_low:
         try:
-            coming = coming_of(supplies())
+            coming = coming_of(supplies(done_max=0))
         except Exception:
             coming = {}
         e = lambda k: html.escape(NAMES.get(k, k))
@@ -380,7 +374,7 @@ def main():
 
 if __name__ == '__main__':
     if sys.argv[1:3] == ['test', 'supply']:  # python3 bot.py test supply → текст /supply, без Telegram
-        print(supplies_text(watch(), supplies()))
+        print(supplies_text(watch(), supplies(done_max=0)))
     elif len(sys.argv) > 1 and sys.argv[1] == 'test':  # python3 bot.py test [final] → картинка в test.png, без Telegram
         fd = (datetime.datetime.now(datetime.UTC).replace(tzinfo=None) + MSK).date() - datetime.timedelta(1) if 'final' in sys.argv else None
         png, cap = build(fd); open('test.png', 'wb').write(png); print(cap)
