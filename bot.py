@@ -222,7 +222,9 @@ def on_upd_answer(cq):
         tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': '✅'})
         tg('editMessageText', {'chat_id': CHAT_ID, 'message_id': msg.get('message_id'), 'text': base + '\n✅ подписан'})
         name = (SIGNER_BY_ID.get(cq.get('from', {}).get('id')) or {}).get('name', '')
-        tg('sendMessage', {'chat_id': CHAT_ID, 'text': ('ww ' + name).strip(), 'reply_to_message_id': msg.get('message_id')})
+        what = '🧪 пример' if e.get('demo') else f'№{num}' + (f' · {e["q"]} шт' if e.get('q') else '')
+        head = f'#{name.lower().replace(" ", "")}подписал {name} сделал работу WW 🎉🎉🎉' if name else 'УПД подписан WW 🎉🎉🎉'
+        tg('sendMessage', {'chat_id': CHAT_ID, 'text': f'{head}\nпо поставке {what}', 'reply_to_message_id': msg.get('message_id')})
     else:
         if e.get('demo'):
             tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'В примере не переспрашиваю'})
