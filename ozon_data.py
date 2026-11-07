@@ -100,3 +100,113 @@ def collect(final_day=None):
         v = items.get(k, [0, 0, 0.0]); avg = week[k] / 7
         it.append({"code": k, "item": NAMES.get(k, k), "orders": v[0], "cancelled": v[1], "sum": round(v[2]), "stock": stock.get(k, 0), "avg7": round(avg, 1), "cover": round(stock.get(k, 0) / avg) if avg else None})
     return {"group_label": GROUP_LABEL, "caption_groups": CAPTION_GROUPS, "summary": summary, "items": it, "days": days, "hours": hours}
+
+
+def _now():
+    return datetime.datetime.now(datetime.UTC).replace(tzinfo=None) + MSK
+
+
+def _posts(since, to):
+    """Заказы FBO между двумя моментами по МСК (naive datetime)."""
+    z = lambda t: (t - MSK).strftime('%Y-%m-%dT%H:%M:%SZ')
+    out, cur = [], ''
+    while True:
+        d = call('/v3/posting/fbo/list', {"dir": "ASC", "filter": {"since": z(since), "to": z(to)}, "limit": 100, "cursor": cur})
+        out += d['postings']
+        if not d.get('has_next'):
+            return out
+        cur = d['cursor']
+
+
+def _stock():
+    st = call('/v2/analytics/stock_on_warehouses', {"limit": 1000, "offset": 0, "warehouse_type": "ALL"})
+    stock = collections.Counter()
+    for r in st['result']['rows']:
+        stock[r['item_code']] += r['free_to_sell_amount']
+    return stock
+
+
+def watch():
+    """Лёгкий срез для тревог: время последнего заказа, обычный темп по часам (7 прошлых дней),
+    остатки и средние продажи в день (как в дашборде: последние 7 дней, включая сегодня)."""
+    now = _now(); today = now.date()
+    posts = _posts(datetime.datetime.combine(today - datetime.timedelta(7), datetime.time()), now)
+    base = [0.0] * 24; week = collections.Counter(); last = None
+    for x in posts:
+        if x['status'] == 'cancelled':
+            continue
+        t = datetime.datetime.fromisoformat(x['created_at'][:19]) + MSK
+        q = sum(p['quantity'] for p in x['products'])
+        if t.date() < today:
+            base[t.hour] += q / 7
+        if t.date() >= today - datetime.timedelta(6):
+            for p in x['products']:
+                week[p['offer_id']] += p['quantity']
+        if last is None or t > last:
+            last = t
+    return {"now": now, "last": last, "base": base, "stock": _stock(), "avg7": {k: v / 7 for k, v in week.items()}}
+
+
+SUPPLY_ACTIVE = ['DATA_FILLING', 'READY_TO_SUPPLY', 'ACCEPTED_AT_SUPPLY_WAREHOUSE', 'IN_TRANSIT',
+                 'ACCEPTANCE_AT_STORAGE_WAREHOUSE', 'REPORTS_CONFIRMATION_AWAITING', 'REPORT_REJECTED',
+                 'REJECTED_AT_SUPPLY_WAREHOUSE']
+
+
+def _supply_ids(states, limit=100, pages=5):
+    out, last = [], ''
+    for _ in range(pages):
+        body = {"filter": {"states": states}, "limit": limit, "sort_by": "ORDER_CREATION", "sort_dir": "DESC"}
+        if last:
+            body['last_id'] = last
+        d = call('/v3/supply-order/list', body)
+        out += d.get('order_ids') or []
+        last = d.get('last_id')
+        if not last or not d.get('order_ids') or len(out) >= limit:
+            break
+    return out
+
+
+def _bundle(bundle_id):
+    items, last = [], ''
+    for _ in range(10):
+        body = {"bundle_ids": [bundle_id], "limit": 100}
+        if last:
+            body['last_id'] = last
+        d = call('/v1/supply-order/bundle', body)
+        items += [(i['offer_id'], i['quantity'], i.get('name') or i['offer_id']) for i in d.get('items') or []]
+        if not d.get('has_next'):
+            break
+        last = d.get('last_id')
+    return items
+
+
+def supplies(done_days=14, done_max=3):
+    """Поставки FBO: все незавершённые и до done_max завершённых за последние done_days дней, с составом."""
+    ts = lambda s: datetime.datetime.fromisoformat(s[:19]) + MSK if s else None
+    active = _supply_ids(SUPPLY_ACTIVE)
+    done = _supply_ids(['COMPLETED'], limit=10, pages=1)
+    orders = []
+    ids = active + done
+    for i in range(0, len(ids), 50):
+        orders += call('/v3/supply-order/get', {"order_ids": ids[i:i + 50]}).get('orders') or []
+    out = []
+    since = _now() - datetime.timedelta(done_days)
+    n_done = 0
+    for o in sorted(orders, key=lambda o: o.get('created_date') or '', reverse=True):
+        upd = ts(o.get('state_updated_date'))
+        if o['state'] == 'COMPLETED':
+            if n_done >= done_max or (upd and upd < since):
+                continue
+            n_done += 1
+        slot = ((o.get('timeslot') or {}).get('timeslot') or {}).get('from')
+        stor = [((s.get('storage_warehouse') or {}).get('name') or '') for s in o.get('supplies') or []]
+        items = []
+        for s in o.get('supplies') or []:
+            if s.get('bundle_id'):
+                items += _bundle(s['bundle_id'])
+        out.append({"number": o.get('order_number') or str(o['order_id']), "state": o['state'],
+                    "created": ts(o.get('created_date')), "updated": upd, "slot": ts(slot),
+                    "dropoff": (o.get('drop_off_warehouse') or {}).get('name') or '',
+                    "storage": [x for x in stor if x],
+                    "items": [(k, q, NAMES.get(k, nm)) for k, q, nm in items]})
+    return out

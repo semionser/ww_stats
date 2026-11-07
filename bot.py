@@ -1,7 +1,9 @@
 """Телеграм-бот «Ozon сегодня».
 
-Команды в разрешённой группе: /now, /Now, /щас (также с @имя_бота).
-Каждый день в DAILY_TIME (МСК) присылает итог за вчера.
+Команды в разрешённой группе: /now, /Now, /щас — дашборд; /supply, /поставки — поставки на склады Ozon
+(также с @имя_бота). Каждый день в DAILY_TIME (МСК) присылает итог за вчера.
+Сам пишет в группу (с 08:00 до 24:00 МСК), когда товар закончился, когда запаса осталось меньше 5 дней
+и когда заказов нет 3+ часа, хотя обычно за это время их 4+.
 
 Безопасность:
 - работает только в одном чате (ALLOWED_CHAT_ID); из любых других чатов сразу выходит и ничего не отвечает;
@@ -11,13 +13,13 @@
 - только исходящие запросы (long polling), никаких открытых портов и вебхуков;
 - ключи только из переменных окружения, в лог не пишутся.
 """
-import datetime, html, json, logging, os, sys, tempfile, threading, time, urllib.request, urllib.error, uuid
+import collections, datetime, html, json, logging, os, sys, tempfile, threading, time, urllib.request, urllib.error, uuid
 
 _missing = [k for k in ('TELEGRAM_BOT_TOKEN', 'ALLOWED_CHAT_ID', 'OZON_CLIENT_ID', 'OZON_API_KEY', 'PRODUCTS_JSON') if not os.environ.get(k)]
 if _missing and sys.argv[1:2] != ['test']:
     sys.exit('Не заданы секреты: ' + ', '.join(_missing))
 
-from ozon_data import collect, MSK
+from ozon_data import collect, MSK, NAMES, watch, supplies
 from widget import widget_html
 from render import to_png
 
@@ -27,8 +29,13 @@ USERS = {int(x) for x in os.environ.get('ALLOWED_USER_IDS', '').replace(' ', '')
 DAILY = os.environ.get('DAILY_TIME', '09:00')
 STATE = os.environ.get('STATE_FILE', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state', 'state.json'))
 SERVE_SECONDS = float(os.environ.get('SERVE_SECONDS', 0))  # 0 = без ограничения; в GitHub Actions ~5 ч 50 мин
-COMMANDS = {'/now', '/щас'}
-WORDS = {'щас', 'ща', 'сейчас', 'now'}  # ответом на сообщение бота: такие ответы Telegram доставляет и в privacy mode
+COMMANDS = {'/now': 'now', '/щас': 'now', '/supply': 'supply', '/поставки': 'supply'}
+# ответом на сообщение бота: такие ответы Telegram доставляет и в privacy mode
+WORDS = {'щас': 'now', 'ща': 'now', 'сейчас': 'now', 'now': 'now', 'поставки': 'supply', 'supply': 'supply'}
+WATCH_EVERY = 15 * 60          # как часто проверять склад и паузу в заказах, сек.
+LOW_DAYS, LOW_RESET = 5, 7     # тревога, когда запас < 5 дн; снова следим, когда поднялся до 7+
+GAP_HOURS, GAP_USUAL = 3, 4    # нет заказов 3+ ч, а обычно за это время 4+ (по 7 прошлым дням)
+QUIET_UNTIL = 8                # с 00:00 до 08:00 МСК бот сам не пишет
 COOLDOWN = 60  # сек.: чаще одного раза в минуту не дёргаем Ozon, повторяем последнюю картинку
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -37,7 +44,9 @@ log = logging.getLogger('bot')
 sys.excepthook = lambda t, v, tb: log.error('fatal: %s', t.__name__)
 threading.excepthook = lambda a: log.error('thread error: %s', a.exc_type.__name__)
 lock = threading.Lock()
+slock = threading.Lock()  # state.json пишут несколько потоков
 cache = {'t': 0, 'png': None, 'caption': ''}
+scache = {'t': 0, 'text': ''}
 ME = ''
 
 
@@ -112,16 +121,27 @@ def load_state():
         return {}
 
 
+def save_state(st):
+    os.makedirs(os.path.dirname(STATE), exist_ok=True)
+    tmp = STATE + '.tmp'
+    json.dump(st, open(tmp, 'w'))
+    os.replace(tmp, STATE)
+
+
+def msk_now():
+    return datetime.datetime.now(datetime.UTC).replace(tzinfo=None) + MSK
+
+
 def scheduler():
     hh, mm = map(int, DAILY.split(':'))
     while True:
       try:
-        now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None) + MSK
-        st = load_state()
-        if (now.hour, now.minute) >= (hh, mm) and st.get('daily') != str(now.date()):
-            st['daily'] = str(now.date())
-            os.makedirs(os.path.dirname(STATE), exist_ok=True)
-            json.dump(st, open(STATE, 'w'))
+        now = msk_now(); due = False
+        with slock:
+            st = load_state()
+            if (now.hour, now.minute) >= (hh, mm) and st.get('daily') != str(now.date()):
+                st['daily'] = str(now.date()); save_state(st); due = True
+        if due:
             log.info('daily report')
             send_dashboard(final_day=now.date() - datetime.timedelta(1))
       except Exception as e:
@@ -129,15 +149,152 @@ def scheduler():
       time.sleep(30)
 
 
+# ---------- поставки ----------
+SUPPLY_RU = {'DATA_FILLING': 'заполняется', 'READY_TO_SUPPLY': 'готова к отгрузке',
+             'ACCEPTED_AT_SUPPLY_WAREHOUSE': 'принята в точке отгрузки', 'IN_TRANSIT': 'едет на склад',
+             'ACCEPTANCE_AT_STORAGE_WAREHOUSE': 'приёмка на складе', 'REPORTS_CONFIRMATION_AWAITING': 'ждёт подтверждения актов',
+             'REPORT_REJECTED': 'акт отклонён', 'REJECTED_AT_SUPPLY_WAREHOUSE': 'отказ в приёмке', 'COMPLETED': 'принята'}
+wh = lambda s: ' '.join(w if len(w) <= 2 else w.capitalize() for w in s.replace('_', ' ').split())
+dm = lambda t: t.strftime('%d.%m %H:%M') if t else '—'
+
+
+def coming_of(S):
+    c = collections.Counter()
+    for s in S:
+        if s['state'] != 'COMPLETED':
+            for k, q, _ in s['items']:
+                c[k] += q
+    return c
+
+
+def supplies_text(W, S):
+    e = html.escape
+    act = [s for s in S if s['state'] != 'COMPLETED']
+    done = [s for s in S if s['state'] == 'COMPLETED']
+    L = [f'🚚 <b>Поставки в работе: {len(act)}</b>' if act else '🚚 <b>Поставок в работе нет</b>']
+    names = {}
+    for s in act:
+        where = wh(s['dropoff']) + (' → ' + ', '.join(map(wh, s['storage'])) if s['storage'] else '')
+        L += ['', f'<b>№{e(s["number"])}</b> · {SUPPLY_RU.get(s["state"], e(s["state"]))}',
+              f'слот {dm(s["slot"])} · {e(where)} · <b>{sum(q for _, q, _ in s["items"])} шт</b>',
+              ', '.join(f'{e(n)} {q}' for _, q, n in sorted(s['items'], key=lambda x: -x[1]))]
+        names.update({k: n for k, _, n in s['items']})
+    coming = coming_of(S)
+    if coming:
+        cov = lambda k, add=0: (W['stock'].get(k, 0) + add) / W['avg7'][k] if W['avg7'].get(k) else None
+        L += ['', '<b>Запас после приёмки</b>']
+        for k in sorted(coming, key=lambda k: (cov(k) is None, cov(k) or 0)):
+            a, b = cov(k), cov(k, coming[k])
+            L.append(f'{e(names[k])}: ' + (f'{a:.0f} → <b>{b:.0f} дн</b>' if a is not None else 'продаж пока нет') + f' (+{coming[k]})')
+    if done:
+        done.sort(key=lambda s: s['updated'] or datetime.datetime.min, reverse=True)
+        L += ['', '<b>Недавно приняты</b>']
+        L += [f'{dm(s["updated"])[:5]} · №{e(s["number"])} · {sum(q for _, q, _ in s["items"])} шт' for s in done]
+    return '\n'.join(L)
+
+
+def send_supplies():
+    with lock:
+        if not (scache['text'] and time.time() - scache['t'] < COOLDOWN):
+            try:
+                text = supplies_text(watch(), supplies())
+            except Exception as e:
+                log.error('supplies failed: %s', type(e).__name__)
+                tg('sendMessage', {'chat_id': CHAT_ID, 'text': 'Не получилось забрать поставки из Ozon, попробуйте через пару минут.'})
+                return
+            scache.update(t=time.time(), text=text)
+        text = scache['text']
+    tg('sendMessage', {'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'HTML'})
+
+
+# ---------- тревоги ----------
+def usual(base, a, b):
+    """Сколько заказов обычно бывает между a и b: средние по часам за 7 прошлых дней."""
+    s, t = 0.0, a
+    while t < b:
+        nxt = min(b, t.replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1))
+        s += base[t.hour] * (nxt - t).total_seconds() / 3600
+        t = nxt
+    return s
+
+
+def check_alerts():
+    W = watch(); now = W['now']
+    if now.hour < QUIET_UNTIL:
+        return
+    new_zero, new_low, gap = [], [], None
+    with slock:
+        st = load_state()
+        first = 'alerts' not in st
+        al = st.get('alerts') or {}
+        zero, low = set(al.get('zero', [])), set(al.get('low', []))
+        for k in set(W['avg7']) | zero | low:
+            n, avg = W['stock'].get(k, 0), W['avg7'].get(k, 0)
+            cover = n / avg if avg else float('inf')
+            if n == 0:
+                if avg and k not in zero:
+                    new_zero.append(k)
+                if avg:
+                    zero.add(k); low.add(k)
+            else:
+                zero.discard(k)
+                if cover < LOW_DAYS:
+                    if k not in low:
+                        new_low.append((k, n, cover))
+                    low.add(k)
+                elif cover >= LOW_RESET:
+                    low.discard(k)
+        L = W['last']
+        if L and now - L >= datetime.timedelta(hours=GAP_HOURS) and al.get('gap') != L.isoformat():
+            u = usual(W['base'], L, now)
+            if u >= GAP_USUAL:
+                gap = (L, u); al['gap'] = L.isoformat()
+        al['zero'], al['low'] = sorted(zero), sorted(low)
+        st['alerts'] = al
+        save_state(st)
+    if first:  # первый запуск: запоминаем текущее состояние молча, пишем только об изменениях
+        log.info('alerts initialised')
+        return
+    if new_zero or new_low:
+        try:
+            coming = coming_of(supplies())
+        except Exception:
+            coming = {}
+        e = lambda k: html.escape(NAMES.get(k, k))
+        go = lambda k: f' · едет {coming[k]} шт' if coming.get(k) else ''
+        T = ['📦 <b>Склад</b>']
+        T += [f'Закончился: <b>{e(k)}</b>{go(k)}' for k in sorted(new_zero, key=e)]
+        T += [f'Мало: <b>{e(k)}</b> · {n} шт, ~{c:.0f} дн{go(k)}' for k, n, c in sorted(new_low, key=lambda x: x[2])]
+        log.info('stock alert')
+        tg('sendMessage', {'chat_id': CHAT_ID, 'text': '\n'.join(T), 'parse_mode': 'HTML'})
+    if gap:
+        L, u = gap; m = int((now - L).total_seconds() // 60)
+        since = L.strftime('%H:%M') if L.date() == now.date() else L.strftime('%d.%m %H:%M')
+        log.info('gap alert')
+        tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML',
+                           'text': f'⏱ Нет заказов с <b>{since}</b>, уже {m // 60} ч {m % 60} мин. Обычно за это время бывает около {round(u)}.'})
+
+
+def watcher():
+    time.sleep(90)
+    while True:
+        try:
+            check_alerts()
+        except Exception as e:
+            log.error('watch: %s', type(e).__name__)
+        time.sleep(WATCH_EVERY)
+
+
 def is_command(text):
+    """Имя действия ('now', 'supply') или None."""
     if not text or not text.startswith('/'):
-        return False
+        return None
     w = text.split()[0].lower()
     if '@' in w:
         w, at = w.split('@', 1)
         if at != ME.lower():
-            return False
-    return w in COMMANDS
+            return None
+    return COMMANDS.get(w)
 
 
 def handle(u):
@@ -163,9 +320,10 @@ def handle(u):
     rep = m.get('reply_to_message') or {}
     is_reply_to_me = rep.get('from', {}).get('username', '').lower() == ME.lower()
     text = m.get('text', '')
-    if is_command(text) or (is_reply_to_me and text.strip(' /!.').lower() in WORDS):
+    act = is_command(text) or (WORDS.get(text.strip(' /!.').lower()) if is_reply_to_me else None)
+    if act:
         log.info('command from allowed chat')
-        threading.Thread(target=send_dashboard, daemon=True).start()
+        threading.Thread(target=send_supplies if act == 'supply' else send_dashboard, daemon=True).start()
 
 
 def main():
@@ -188,16 +346,19 @@ def main():
     if mine.get('status') == 'administrator':
         sys.exit('Бот — админ группы и получает всю переписку: снимите админку')
     tg('deleteWebhook', {'drop_pending_updates': False})  # команды, пришедшие между запусками, не теряем
-    tg('setMyCommands', {'commands': [{'command': 'now', 'description': 'Дашборд Ozon сейчас'}],
+    tg('setMyCommands', {'commands': [{'command': 'now', 'description': 'Дашборд Ozon сейчас'},
+                                      {'command': 'supply', 'description': 'Поставки на склады Ozon'}],
                          'scope': {'type': 'chat', 'chat_id': CHAT_ID}})
     if join_warning:  # предупреждаем в саму группу (не в публичный лог), не чаще раза в день
-        st = load_state(); today = str((datetime.datetime.now(datetime.UTC).replace(tzinfo=None) + MSK).date())
-        if st.get('join_warned') != today:
+        today = str(msk_now().date())
+        with slock:
+            st = load_state(); warn = st.get('join_warned') != today
+            if warn:
+                st['join_warned'] = today; save_state(st)
+        if warn:
             tg('sendMessage', {'chat_id': CHAT_ID, 'text': '⚠️ Бота сейчас можно добавить в любую группу. Закройте это: @BotFather → /setjoingroups → выбрать бота → Disable.'})
-            st['join_warned'] = today
-            os.makedirs(os.path.dirname(STATE), exist_ok=True)
-            json.dump(st, open(STATE, 'w'))
     threading.Thread(target=scheduler, daemon=True).start()
+    threading.Thread(target=watcher, daemon=True).start()
     log.info('bot started')  # имя бота в лог не пишем: логи Actions публичные
     off = None
     end = time.time() + SERVE_SECONDS if SERVE_SECONDS else None
@@ -218,7 +379,9 @@ def main():
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == 'test':  # python3 bot.py test [final] → картинка в test.png, без Telegram
+    if sys.argv[1:3] == ['test', 'supply']:  # python3 bot.py test supply → текст /supply, без Telegram
+        print(supplies_text(watch(), supplies()))
+    elif len(sys.argv) > 1 and sys.argv[1] == 'test':  # python3 bot.py test [final] → картинка в test.png, без Telegram
         fd = (datetime.datetime.now(datetime.UTC).replace(tzinfo=None) + MSK).date() - datetime.timedelta(1) if 'final' in sys.argv else None
         png, cap = build(fd); open('test.png', 'wb').write(png); print(cap)
     else:
