@@ -2,6 +2,7 @@
 
 Команды в разрешённой группе: /now, /Now, /щас — дашборд; /supply, /поставки — поставки на склады Ozon
 (также с @имя_бота). Каждый день в DAILY_TIME (МСК) присылает итог за вчера.
+После приёмки поставки спрашивает «УПД подписал?» с кнопками ДА/НЕТ и переспрашивает каждые 3 ч днём до «ДА».
 Сам пишет в группу (с 08:00 до 24:00 МСК), когда товар закончился, когда запаса осталось меньше 5 дней,
 когда днём (10:00–22:00) 3+ часа нет заказов, когда цена товара сдвинулась на 10%+ и когда у поставки сменился статус.
 
@@ -39,6 +40,12 @@ DAY_FROM, DAY_TO = 10, 22      # «днём» = с 10:00 до 22:00 МСК; па
 PRICE_JUMP = 0.10              # тревога, если цена товара сдвинулась на 10%+ от последней известной
 QUIET_UNTIL = 8                # с 00:00 до 08:00 МСК бот сам не пишет
 COOLDOWN = 60  # сек.: чаще одного раза в минуту не дёргаем Ozon, повторяем последнюю картинку
+# Кто подписывает УПД: {"id": ..., "username": ..., "name": ...} — только из секрета UPD_SIGNER, в коде нет.
+try:
+    SIGNER = json.loads(os.environ.get('UPD_SIGNER') or '{}')
+except Exception:
+    SIGNER = {}
+UPD_EVERY = 3 * 3600  # пока нет «ДА», переспрашиваем каждые 3 ч днём
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('bot')
@@ -134,6 +141,89 @@ def msk_now():
     return datetime.datetime.now(datetime.UTC).replace(tzinfo=None) + MSK
 
 
+# ---------- «УПД подписал?» ----------
+def next_ask(t):
+    """Через 3 ч, но только днём: если выпадает на ночь — в DAY_FROM:00 ближайшего утра."""
+    n = t + datetime.timedelta(seconds=UPD_EVERY)
+    if n.hour >= DAY_TO:
+        n = (n + datetime.timedelta(days=1)).replace(hour=DAY_FROM, minute=0, second=0, microsecond=0)
+    elif n.hour < DAY_FROM:
+        n = n.replace(hour=DAY_FROM, minute=0, second=0, microsecond=0)
+    return n
+
+
+def upd_question(num, q, demo=False):
+    who = f' @{SIGNER["username"]}' if SIGNER.get('username') else ''
+    tail = '🧪 пример, поставка выдумана' if demo else f'Поставка №{num}' + (f' · {q} шт' if q else '')
+    return f'УПД подписал?{who}\n{tail}'
+
+
+def ask_upd(num, q, demo=False):
+    """Шлёт вопрос с кнопками ДА/НЕТ; у прошлого вопроса по этой поставке кнопки убирает."""
+    kb = {'inline_keyboard': [[{'text': 'ДА', 'callback_data': f'upd:{num}:y'}, {'text': 'НЕТ', 'callback_data': f'upd:{num}:n'}]]}
+    r = tg('sendMessage', {'chat_id': CHAT_ID, 'text': upd_question(num, q, demo), 'reply_markup': kb})
+    if not r:
+        return
+    with slock:
+        st = load_state(); u = st.setdefault('upd', {}); old = u.get(num)
+        u[num] = {'q': q, 'msg': r['message_id'], 'next': next_ask(msk_now()).isoformat(), 'demo': demo}
+        save_state(st)
+    if old and old.get('msg'):
+        tg('editMessageReplyMarkup', {'chat_id': CHAT_ID, 'message_id': old['msg'], 'reply_markup': {'inline_keyboard': []}})
+    log.info('upd question sent')
+
+
+def check_upd():
+    now = msk_now()
+    if not (DAY_FROM <= now.hour < DAY_TO):
+        return
+    with slock:
+        due = [(n, e) for n, e in (load_state().get('upd') or {}).items()
+               if not e.get('demo') and datetime.datetime.fromisoformat(e['next']) <= now]
+    for n, e in due:
+        ask_upd(n, e.get('q'))
+
+
+def on_upd_answer(cq):
+    """Нажали ДА/НЕТ. Отвечать могут подписант УПД и ALLOWED_USER_IDS."""
+    msg = cq.get('message') or {}
+    ok = USERS | ({int(SIGNER['id'])} if SIGNER.get('id') else set())
+    if ok and cq.get('from', {}).get('id') not in ok:
+        tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'Ответить может только тот, кто подписывает УПД'})
+        return
+    try:
+        _, num, ans = cq.get('data', '').split(':', 2)
+    except ValueError:
+        tg('answerCallbackQuery', {'callback_query_id': cq['id']}); return
+    with slock:
+        st = load_state(); u = st.get('upd') or {}; e = u.get(num)
+        if e is not None:
+            if ans == 'y':
+                u.pop(num)
+            else:
+                e['next'] = next_ask(msk_now()).isoformat()
+            st['upd'] = u; save_state(st)
+    base = upd_question(num, e.get('q') if e else None, bool(e and e.get('demo')))
+    if e is None:
+        tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'Уже отмечено'})
+        tg('editMessageReplyMarkup', {'chat_id': CHAT_ID, 'message_id': msg.get('message_id'), 'reply_markup': {'inline_keyboard': []}})
+        return
+    log.info('upd answer')
+    if ans == 'y':
+        tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': '✅'})
+        tg('editMessageText', {'chat_id': CHAT_ID, 'message_id': msg.get('message_id'), 'text': base + '\n✅ подписан'})
+        tg('sendMessage', {'chat_id': CHAT_ID, 'text': ('ww ' + SIGNER.get('name', '')).strip(), 'reply_to_message_id': msg.get('message_id')})
+    else:
+        if e.get('demo'):
+            tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'В примере не переспрашиваю'})
+            tg('editMessageText', {'chat_id': CHAT_ID, 'message_id': msg.get('message_id'), 'text': base + '\n❌ пока нет'})
+            return
+        nxt = datetime.datetime.fromisoformat(e['next'])
+        when = nxt.strftime('в %H:%M') if nxt.date() == msk_now().date() else nxt.strftime('завтра в %H:%M')
+        tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': f'Напомню {when}'})
+        tg('editMessageText', {'chat_id': CHAT_ID, 'message_id': msg.get('message_id'), 'text': base + f'\n❌ пока нет · напомню {when}'})
+
+
 def scheduler():
     hh, mm = map(int, DAILY.split(':'))
     while True:
@@ -146,6 +236,7 @@ def scheduler():
         if due:
             log.info('daily report')
             send_dashboard(final_day=now.date() - datetime.timedelta(1))
+        check_upd()
       except Exception as e:
         log.error('scheduler: %s', type(e).__name__)
       time.sleep(30)
@@ -273,8 +364,6 @@ def supplies_text(S, changed=None, gone=()):
     for g in gone:
         B = supply_block(g['number'], g['state'], None, True, g['prev'])
         B[-1] += f' · <b>{g["qty"]} шт</b>'
-        if g['state'] == 'COMPLETED':
-            B.append('📄 Проверьте УПД по этой поставке в кабинете Ozon')
         L += [''] + B
     if L:
         L.append('')
@@ -317,6 +406,9 @@ def check_supplies():
         log.info('supply status changed')
         if not tg('sendMessage', {'chat_id': CHAT_ID, 'text': supplies_text(S, changed, gone), 'parse_mode': 'HTML'}):
             return  # не дошло: состояние не сохраняем, повторим через 15 минут
+        for g in gone:
+            if g['state'] == 'COMPLETED':
+                ask_upd(g['number'], g['qty'])
     with slock:
         st = load_state(); st['supplies'] = new
         if arrived:
@@ -478,6 +570,13 @@ def is_command(text):
 
 
 def handle(u):
+    cq = u.get('callback_query')
+    if cq:  # кнопки ДА/НЕТ под вопросом про УПД
+        if (cq.get('message') or {}).get('chat', {}).get('id') == CHAT_ID and cq.get('data', '').startswith('upd:'):
+            on_upd_answer(cq)
+        else:
+            tg('answerCallbackQuery', {'callback_query_id': cq['id']})
+        return
     mcm = u.get('my_chat_member')
     if mcm:
         if mcm['chat']['id'] == CHAT_ID and mcm['new_chat_member']['status'] == 'administrator':
@@ -539,13 +638,15 @@ def main():
             tg('sendMessage', {'chat_id': CHAT_ID, 'text': '⚠️ Бота сейчас можно добавить в любую группу. Закройте это: @BotFather → /setjoingroups → выбрать бота → Disable.'})
     if os.environ.get('DEMO') == 'supply_acceptance':
         send_demo_acceptance()
+    if os.environ.get('DEMO') == 'upd':
+        ask_upd('demo', 0, demo=True)
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=watcher, daemon=True).start()
     log.info('bot started')  # имя бота в лог не пишем: логи Actions публичные
     off = None
     end = time.time() + SERVE_SECONDS if SERVE_SECONDS else None
     while end is None or time.time() < end:
-        res = tg('getUpdates', {'timeout': 50, 'offset': off, 'allowed_updates': ['message', 'my_chat_member']})
+        res = tg('getUpdates', {'timeout': 50, 'offset': off, 'allowed_updates': ['message', 'my_chat_member', 'callback_query']})
         if res is None:
             time.sleep(5); continue
         for u in res:

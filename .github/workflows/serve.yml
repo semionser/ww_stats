@@ -10,7 +10,7 @@ on:
       demo:
         description: "Разово прислать пример сообщения в группу"
         type: choice
-        options: [none, supply_acceptance]
+        options: [none, supply_acceptance, upd]
         default: none
   push:
     branches: [main]
@@ -46,6 +46,7 @@ jobs:
           OZON_CLIENT_ID: ${{ secrets.OZON_CLIENT_ID }}
           OZON_API_KEY: ${{ secrets.OZON_API_KEY }}
           PRODUCTS_JSON: ${{ secrets.PRODUCTS_JSON }}
+          UPD_SIGNER: ${{ secrets.UPD_SIGNER }}
           DAILY_TIME: "09:00"
           SERVE_SECONDS: "20700"
           DEMO: ${{ inputs.demo }}
