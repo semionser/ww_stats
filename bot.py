@@ -40,15 +40,17 @@ DAY_FROM, DAY_TO = 10, 22      # «днём» = с 10:00 до 22:00 МСК; па
 PRICE_JUMP = 0.10              # тревога, если цена товара сдвинулась на 10%+ от последней известной
 QUIET_UNTIL = 8                # с 00:00 до 08:00 МСК бот сам не пишет
 COOLDOWN = 60  # сек.: чаще одного раза в минуту не дёргаем Ozon, повторяем последнюю картинку
-# Кто подписывает УПД: {"id": ..., "username": ..., "name": ...} — только из секрета UPD_SIGNER, в коде нет.
+# Кто подписывает УПД — только из секрета UPD_SIGNER, в коде нет. Один подписант или список:
+# {"id": ..., "username": ..., "name": ...}  или  [{...}, {...}]
 try:
-    SIGNER = json.loads(os.environ.get('UPD_SIGNER') or '{}')
+    _sg = json.loads(os.environ.get('UPD_SIGNER') or '[]')
+    SIGNERS = [x for x in (_sg if isinstance(_sg, list) else [_sg]) if str(x.get('id', '')).isdigit()]
 except Exception:
-    SIGNER = {}
-SIGNER_ID = int(SIGNER['id']) if str(SIGNER.get('id', '')).isdigit() else None
-OWNERS = set(USERS)  # люди из ALLOWED_USER_IDS (без подписанта)
-if SIGNER_ID and USERS:
-    USERS = USERS | {SIGNER_ID}  # подписант тоже может вызывать команды
+    SIGNERS = []
+SIGNER_BY_ID = {int(x['id']): x for x in SIGNERS}
+OWNERS = set(USERS)  # люди из ALLOWED_USER_IDS
+if SIGNER_BY_ID and USERS:
+    USERS = USERS | set(SIGNER_BY_ID)  # подписанты тоже могут вызывать команды
 UPD_EVERY = 3 * 3600  # пока нет «ДА», переспрашиваем каждые 3 ч днём
 NOT_SIGNER = 'вы не роман, ваш отец не зарабатывает 300к'  # чужим
 NOT_SIGNER_OWNER = 'Не по статусу)'                         # людям из ALLOWED_USER_IDS
@@ -159,7 +161,7 @@ def next_ask(t):
 
 
 def upd_question(num, q, demo=False):
-    who = f' @{SIGNER["username"]}' if SIGNER.get('username') else ''
+    who = ''.join(f' @{x["username"]}' for x in SIGNERS if x.get('username'))
     tail = '🧪 пример, поставка выдумана' if demo else f'Поставка №{num}' + (f' · {q} шт' if q else '')
     return f'УПД подписал?{who}\n{tail}'
 
@@ -191,9 +193,9 @@ def check_upd():
 
 
 def on_upd_answer(cq):
-    """Нажали ДА/НЕТ. Отвечать может только подписант (если UPD_SIGNER не задан — люди из ALLOWED_USER_IDS)."""
+    """Нажали ДА/НЕТ. Отвечать могут только подписанты (если UPD_SIGNER не задан — люди из ALLOWED_USER_IDS)."""
     msg = cq.get('message') or {}
-    ok = {SIGNER_ID} if SIGNER_ID else USERS
+    ok = set(SIGNER_BY_ID) or USERS
     if ok and cq.get('from', {}).get('id') not in ok:
         who = cq.get('from', {}).get('id')
         tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': NOT_SIGNER_OWNER if who in OWNERS else NOT_SIGNER, 'show_alert': True})
@@ -219,7 +221,8 @@ def on_upd_answer(cq):
     if ans == 'y':
         tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': '✅'})
         tg('editMessageText', {'chat_id': CHAT_ID, 'message_id': msg.get('message_id'), 'text': base + '\n✅ подписан'})
-        tg('sendMessage', {'chat_id': CHAT_ID, 'text': ('ww ' + SIGNER.get('name', '')).strip(), 'reply_to_message_id': msg.get('message_id')})
+        name = (SIGNER_BY_ID.get(cq.get('from', {}).get('id')) or {}).get('name', '')
+        tg('sendMessage', {'chat_id': CHAT_ID, 'text': ('ww ' + name).strip(), 'reply_to_message_id': msg.get('message_id')})
     else:
         if e.get('demo'):
             tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'В примере не переспрашиваю'})
