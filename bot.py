@@ -45,7 +45,11 @@ try:
     SIGNER = json.loads(os.environ.get('UPD_SIGNER') or '{}')
 except Exception:
     SIGNER = {}
+SIGNER_ID = int(SIGNER['id']) if str(SIGNER.get('id', '')).isdigit() else None
+if SIGNER_ID and USERS:
+    USERS = USERS | {SIGNER_ID}  # подписант тоже может вызывать команды
 UPD_EVERY = 3 * 3600  # пока нет «ДА», переспрашиваем каждые 3 ч днём
+NOT_SIGNER = 'вы не роман, ваш отец не зарабатывает 300к'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('bot')
@@ -185,11 +189,11 @@ def check_upd():
 
 
 def on_upd_answer(cq):
-    """Нажали ДА/НЕТ. Отвечать могут подписант УПД и ALLOWED_USER_IDS."""
+    """Нажали ДА/НЕТ. Отвечать может только подписант (если UPD_SIGNER не задан — люди из ALLOWED_USER_IDS)."""
     msg = cq.get('message') or {}
-    ok = USERS | ({int(SIGNER['id'])} if SIGNER.get('id') else set())
+    ok = {SIGNER_ID} if SIGNER_ID else USERS
     if ok and cq.get('from', {}).get('id') not in ok:
-        tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'Ответить может только тот, кто подписывает УПД'})
+        tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': NOT_SIGNER, 'show_alert': True})
         return
     try:
         _, num, ans = cq.get('data', '').split(':', 2)
