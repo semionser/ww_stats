@@ -70,8 +70,8 @@ def caption(A, final):
     """Подпись под картинкой (Telegram HTML): баланс, начислено за день, заказы с разбивкой по группам и сумма."""
     s = A['summary']
     by_code = {r['code']: r['orders'] for r in A['items']}
-    parts = [f'{html.escape(g["label"])} {sum(by_code.get(c, 0) for c in g["codes"])}' for g in A.get('caption_groups', [])]
-    br = f' ({" / ".join(parts)})' if parts else ''
+    parts = [str(sum(by_code.get(c, 0) for c in g['codes'])) for g in A.get('caption_groups', [])]
+    br = f' ({"/".join(parts)})' if parts else ''
     acc = ('+' if s['accrued'] > 0 else '') + fmt(s['accrued'])
     t = (f'Баланс: <b>{fmt(s["balance"])} ₽</b>\n'
          f'За день: <b>{acc} ₽</b>\n'
