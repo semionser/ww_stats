@@ -176,8 +176,9 @@ def main():
     ME = me['username']
     if me.get('can_read_all_group_messages'):
         sys.exit('Privacy mode выключен: бот видел бы всю переписку. @BotFather → /setprivacy → Enable')
-    if me.get('can_join_groups'):
-        log.warning('Бота можно добавлять в группы: @BotFather → /setjoingroups → Disable')
+    join_warning = bool(me.get('can_join_groups'))
+    if join_warning:
+        log.warning('can_join_groups is on')
     chat = tg('getChat', {'chat_id': CHAT_ID})
     if not chat:
         sys.exit('Бот не состоит в группе ALLOWED_CHAT_ID')
@@ -189,6 +190,13 @@ def main():
     tg('deleteWebhook', {'drop_pending_updates': False})  # команды, пришедшие между запусками, не теряем
     tg('setMyCommands', {'commands': [{'command': 'now', 'description': 'Дашборд Ozon сейчас'}],
                          'scope': {'type': 'chat', 'chat_id': CHAT_ID}})
+    if join_warning:  # предупреждаем в саму группу (не в публичный лог), не чаще раза в день
+        st = load_state(); today = str((datetime.datetime.now(datetime.UTC).replace(tzinfo=None) + MSK).date())
+        if st.get('join_warned') != today:
+            tg('sendMessage', {'chat_id': CHAT_ID, 'text': '⚠️ Бота сейчас можно добавить в любую группу. Закройте это: @BotFather → /setjoingroups → выбрать бота → Disable.'})
+            st['join_warned'] = today
+            os.makedirs(os.path.dirname(STATE), exist_ok=True)
+            json.dump(st, open(STATE, 'w'))
     threading.Thread(target=scheduler, daemon=True).start()
     log.info('bot started')  # имя бота в лог не пишем: логи Actions публичные
     off = None
