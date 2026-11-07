@@ -2,7 +2,8 @@
 import html
 
 
-def widget_html(A, FINAL=False):
+def widget_html(A, FINAL=False, wide=False):
+  """wide=True: две колонки, картинка почти квадратная — Telegram показывает её на всю ширину без полос по бокам."""
   s=A['summary'];it=A['items'];dy=A['days'];hr=A['hours']
   day=s['updated'][:5];tm=s['updated'][6:]
   prevday=dy[-2]['day'][8:]+'.'+dy[-2]['day'][5:7] if len(dy)>1 else 'вчера'
@@ -16,7 +17,11 @@ def widget_html(A, FINAL=False):
     return f'<span style="color:{col}">{sg(d)}{pct}</span> <span style="color:var(--text-muted)">{cmp}</span>'
   P='background:var(--surface-1);border-radius:10px;'
   LB='color:var(--text-secondary);font-size:11px'
-  h='<div style="font-family:system-ui,-apple-system,sans-serif;color:var(--text-primary);display:grid;gap:8px;font-variant-numeric:tabular-nums;max-width:440px;font-size:13px">'
+  COL='<div style="display:grid;gap:8px;align-content:start;min-width:0">'
+  if wide:
+    h='<div style="font-family:system-ui,-apple-system,sans-serif;color:var(--text-primary);display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start;font-variant-numeric:tabular-nums;font-size:13px">'+COL
+  else:
+    h='<div style="font-family:system-ui,-apple-system,sans-serif;color:var(--text-primary);display:grid;gap:8px;font-variant-numeric:tabular-nums;max-width:440px;font-size:13px">'
   title=f'Ozon · итог за {day}' if FINAL else f'Ozon · {day} {tm} МСК'
   h+=f'<div style="display:flex;justify-content:space-between;align-items:baseline;gap:6px"><b style="font-size:14px">{title}</b><span style="font-size:11px;color:var(--text-secondary)">посл. заказ {s["last_order"]}</span></div>'
   # hero 2 cols
@@ -33,7 +38,7 @@ def widget_html(A, FINAL=False):
   h+=kpi('Отмены',f(s['cancelled']),f'<span style="color:var(--text-muted)">{s["cancelled"]/tot_o*100:.0f}% от заказов</span>' if tot_o else '')
   h+='</div>'
   # hourly chart, phone-sized viewBox so text stays readable
-  W,H,L,B,T=340,80,22,16,8;cur=23 if FINAL else s['hour'];mx=max(max(hr['today'][:cur+1]),max(hr['yest']),1)
+  W,H,L,B,T=340,(175 if wide else 80),22,16,8;cur=23 if FINAL else s['hour'];mx=max(max(hr['today'][:cur+1]),max(hr['yest']),1)
   X=lambda i:L+(W-L-6)*i/23;Y=lambda v:T+(H-T-B)*(1-v/mx)
   grid=''.join(f'<line x1="{L}" x2="{W-6}" y1="{Y(v):.1f}" y2="{Y(v):.1f}" stroke="var(--border)" stroke-width="1"/><text class="ts" x="{L-4}" y="{Y(v)+4:.1f}" text-anchor="end">{v}</text>' for v in sorted({0,mx}))
   xt=''.join(f'<text class="ts" x="{X(i):.1f}" y="{H-2}" text-anchor="middle">{i:02d}</text>' for i in (0,6,12,18,23))
@@ -49,6 +54,7 @@ def widget_html(A, FINAL=False):
   yl=prevday if FINAL else 'вчера'
   h+=(f'<div style="{P}padding:8px 10px"><div style="display:flex;justify-content:space-between;gap:4px;font-size:12px"><b>Заказы по часам</b>'
       f'<span style="color:var(--text-secondary)"><span style="color:var(--text-accent)">━</span> {"за день" if FINAL else "сегодня"} {ev} &nbsp;<span style="color:var(--text-muted)">┅</span> {yl} {hr["yest"][cur]}</span></div>{svg}</div>')
+  if wide: h+='</div>'+COL
   # items: compact grid rows, no horizontal scroll
   mxo=max([r['orders'] for r in it]+[1])
   G='display:grid;grid-template-columns:minmax(0,1fr) 46px 44px 30px 46px;gap:5px;align-items:center'
@@ -80,6 +86,7 @@ def widget_html(A, FINAL=False):
   note='Остаток на текущий момент.' if FINAL else 'Рекламу за день Озон списывает ночью.'
   h+=(f'<div style="{P}padding:8px 10px"><div style="display:flex;justify-content:space-between;gap:4px;font-size:12px"><b>Начислено за 7 дней</b><span style="color:var(--text-secondary)">{f(tot)} ₽ · ~{f(tot/n)}/день</span></div>'
       f'<svg viewBox="0 0 {W2} {H2}" width="100%" role="img" aria-label="Начислено по дням">{g}</svg><div style="font-size:10px;color:var(--text-muted)">{note}</div></div>')
+  if wide: h+='</div>'
   h+='</div>'
   return h
 

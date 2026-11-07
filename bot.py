@@ -85,7 +85,7 @@ def build(final_day=None):
     A = collect(final_day)
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, 'ozon.png')
-        to_png(widget_html(A, FINAL=bool(final_day)), p)
+        to_png(widget_html(A, FINAL=bool(final_day), wide=True), p, wide=True)
         return open(p, 'rb').read(), caption(A, bool(final_day))
 
 

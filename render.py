@@ -6,7 +6,7 @@ CSS = """
 :root{--text-primary:#1f2328;--text-secondary:#59636e;--text-muted:#8c959f;--text-success:#1a7f37;
 --text-warning:#9a6700;--text-danger:#cf222e;--text-accent:#0969da;--surface-1:#f1f3f5;--border:#d0d7de}
 html,body{margin:0;background:#ffffff}
-#w{padding:8px;width:416px}
+#w{padding:8px;width:416px} #w.wide{width:660px}
 svg text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 .t{font-size:14px;fill:var(--text-primary)} .ts{font-size:12px;fill:var(--text-secondary)}
 .th{font-size:14px;font-weight:500;fill:var(--text-primary)}
@@ -14,8 +14,8 @@ svg text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 """
 
 
-def to_png(fragment: str, path: str):
-    page_html = f'<!doctype html><html><head><meta charset="utf-8"><style>{CSS}</style></head><body><div id="w">{fragment}</div></body></html>'
+def to_png(fragment: str, path: str, wide: bool = False):
+    page_html = f'<!doctype html><html><head><meta charset="utf-8"><style>{CSS}</style></head><body><div id="w"{' class="wide"' if wide else ''}>{fragment}</div></body></html>'
     with sync_playwright() as p:
         b = p.chromium.launch(args=['--no-sandbox'], executable_path=os.environ.get('CHROMIUM_PATH') or None)
         try:
