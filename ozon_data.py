@@ -207,6 +207,7 @@ def supplies(done_days=14, done_max=3):
         out.append({"id": o['order_id'], "number": o.get('order_number') or str(o['order_id']), "state": o['state'],
                     "created": ts(o.get('created_date')), "updated": upd, "slot": ts(slot),
                     "dropoff": (o.get('drop_off_warehouse') or {}).get('name') or '',
+                    "crossdock": any(s.get('is_crossdock') for s in o.get('supplies') or []),
                     "storage": [x for x in stor if x],
                     "items": [(k, q, NAMES.get(k, nm)) for k, q, nm in items]})
     return out
@@ -218,4 +219,19 @@ def supply_states(ids):
     for i in range(0, len(ids), 50):
         for o in call('/v3/supply-order/get', {"order_ids": ids[i:i + 50]}).get('orders') or []:
             out[o['order_id']] = o['state']
+    return out
+
+
+def transit_history(n=30):
+    """Сколько дней прошлые кросс-док поставки шли от сдачи в точке отгрузки до приёмки (по завершённым).
+    Озон не отдаёт плановую дату приезда, поэтому оцениваем по истории. Явные выбросы (> 10 дн) отбрасываем."""
+    ids = _supply_ids(['COMPLETED'], limit=n, pages=1)
+    out = []
+    for i in range(0, len(ids), 50):
+        for o in call('/v3/supply-order/get', {"order_ids": ids[i:i + 50]}).get('orders') or []:
+            slot = ((o.get('timeslot') or {}).get('timeslot') or {}).get('from')
+            if slot and o.get('state_updated_date') and any(s.get('is_crossdock') for s in o.get('supplies') or []):
+                d = (datetime.datetime.fromisoformat(o['state_updated_date'][:19]) - datetime.datetime.fromisoformat(slot[:19])).total_seconds() / 86400
+                if 0.2 < d <= 10:
+                    out.append(d)
     return out

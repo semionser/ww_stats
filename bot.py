@@ -13,13 +13,13 @@
 - только исходящие запросы (long polling), никаких открытых портов и вебхуков;
 - ключи только из переменных окружения, в лог не пишутся.
 """
-import collections, datetime, html, json, logging, os, sys, tempfile, threading, time, urllib.request, urllib.error, uuid
+import collections, datetime, html, json, statistics, logging, os, sys, tempfile, threading, time, urllib.request, urllib.error, uuid
 
 _missing = [k for k in ('TELEGRAM_BOT_TOKEN', 'ALLOWED_CHAT_ID', 'OZON_CLIENT_ID', 'OZON_API_KEY', 'PRODUCTS_JSON') if not os.environ.get(k)]
 if _missing and sys.argv[1:2] != ['test']:
     sys.exit('Не заданы секреты: ' + ', '.join(_missing))
 
-from ozon_data import collect, MSK, NAMES, watch, supplies, supply_states, SUPPLY_ACTIVE
+from ozon_data import collect, MSK, NAMES, watch, supplies, supply_states, transit_history, SUPPLY_ACTIVE
 from widget import widget_html
 from render import to_png
 
@@ -200,6 +200,52 @@ def supply_block(num, st, line=None, changed=False, prev=None):
     return B
 
 
+BEFORE_DROP = ('DATA_FILLING', 'READY_TO_SUPPLY')
+ON_THE_WAY = ('ACCEPTED_AT_SUPPLY_WAREHOUSE', 'IN_TRANSIT')
+eta_cache = {'t': 0, 'days': None}
+
+
+def transit_days():
+    """Сколько дней кросс-док поставка обычно едет до склада: сначала по тому, что бот сам видел,
+    иначе по истории завершённых поставок из Ozon, иначе 3 дня."""
+    seen = load_state().get('arrive_days') or []
+    if len(seen) >= 2:
+        return statistics.median(seen)
+    if eta_cache['days'] is None or time.time() - eta_cache['t'] > 12 * 3600:
+        try:
+            h = transit_history()
+            eta_cache.update(t=time.time(), days=statistics.median(h + seen) if h + seen else 3.0)
+        except Exception as e:
+            log.warning('transit history: %s', type(e).__name__)
+            return eta_cache['days'] or 3.0
+    return eta_cache['days']
+
+
+def dur(td):
+    m = int(td.total_seconds() // 60)
+    if m < 60:
+        return 'меньше часа'
+    d, h = divmod(m // 60, 24)
+    return f'{d} д {h} ч' if d else f'{h} ч'
+
+
+def timing(s, now, tdays):
+    """Одна строка про сроки: когда сдать, сколько уже едет и когда приедет."""
+    eta = s['slot'] + datetime.timedelta(days=tdays) if s['slot'] and s.get('crossdock') else None
+    when = lambda t: f'<b>~{t:%d.%m}</b>'
+    if s['state'] in BEFORE_DROP and s['slot']:
+        return f'сдать {dm(s["slot"])}' + (f' · приедет {when(eta)}' if eta else '')
+    if s['state'] in ON_THE_WAY:
+        start = s['updated'] if s['state'] == 'ACCEPTED_AT_SUPPLY_WAREHOUSE' and s['updated'] else s['slot']
+        t = f'в пути {dur(now - start)}' if start and now > start else 'в пути'
+        if eta:
+            t += f' · приедет {when(eta)}' if eta.date() >= now.date() else f' · опаздывает, ждали {when(eta)}'
+        return t
+    if s['state'] == 'ACCEPTANCE_AT_STORAGE_WAREHOUSE' and s['updated']:
+        return f'на складе с {dm(s["updated"])}'
+    return None
+
+
 def supplies_text(S, changed=None, gone=()):
     """changed: {order_id: прежний статус или None для новой}; gone: ушедшие из работы (приняты, отменены)."""
     e = html.escape; changed = changed or {}
@@ -217,10 +263,13 @@ def supplies_text(S, changed=None, gone=()):
     if L:
         L.append('')
     L.append(f'🚚 <b>Поставки в работе: {len(act)}</b>' if act else '🚚 <b>Поставок в работе нет</b>')
+    now = msk_now()
+    tdays = transit_days() if any(s.get('crossdock') and s['state'] in BEFORE_DROP + ON_THE_WAY for s in act) else 0
     for s in act:
         where = wh(s['dropoff']) + (' → ' + ', '.join(map(wh, s['storage'])) if s['storage'] else '')
-        line = f'слот {dm(s["slot"])} · {e(where)} · <b>{qty(s)} шт</b>'
-        L += [''] + supply_block(s['number'], s['state'], line, s['id'] in changed, changed.get(s['id']))
+        B = supply_block(s['number'], s['state'], f'{e(where)} · <b>{qty(s)} шт</b>', s['id'] in changed, changed.get(s['id']))
+        t = timing(s, now, tdays)
+        L += [''] + B + ([t] if t else [])
     return '\n'.join(L)
 
 
@@ -245,12 +294,18 @@ def check_supplies():
                 new[i] = old[i]
             else:
                 gone.append({'number': old[i]['n'], 'state': g, 'qty': old[i]['q'], 'prev': old[i]['s']})
+    arrived = [(msk_now() if not s['updated'] else s['updated']) - s['slot'] for i, s in cur.items()
+               if s.get('crossdock') and s['slot'] and i in old and old[i]['s'] in ON_THE_WAY
+               and s['state'] in ('ACCEPTANCE_AT_STORAGE_WAREHOUSE', 'REPORTS_CONFIRMATION_AWAITING')]
     if not first and (changed or gone):
         log.info('supply status changed')
         if not tg('sendMessage', {'chat_id': CHAT_ID, 'text': supplies_text(S, changed, gone), 'parse_mode': 'HTML'}):
             return  # не дошло: состояние не сохраняем, повторим через 15 минут
     with slock:
-        st = load_state(); st['supplies'] = new; save_state(st)
+        st = load_state(); st['supplies'] = new
+        if arrived:
+            st['arrive_days'] = ((st.get('arrive_days') or []) + [round(a.total_seconds() / 86400, 2) for a in arrived])[-10:]
+        save_state(st)
 
 
 def send_demo_acceptance():
