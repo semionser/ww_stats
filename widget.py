@@ -160,7 +160,9 @@ def _wide(A, FINAL=False):
            f'<span style="white-space:nowrap">{bar}<b>{r["orders"]}</b>{cn}</span><span style="text-align:right">{k(r["sum"])}</span>'
            f'<span style="text-align:right;color:{P["sub"]}">{r["stock"]}</span><span style="text-align:right">{chip}</span></div>')
   right=f'<div style="{C}"><div style="font-size:13px;margin-bottom:6px"><b>Товары {"за день" if FINAL else "сегодня"}</b></div>{rows}</div>'
-  # начислено за 7 дней
+  # начислено за 7 дней; среднее — по полным дням (сегодняшний ещё не закончился)
+  full=dy if FINAL else dy[:-1]
+  avg=sum(r['accrued'] for r in full)/len(full) if full else 0
   W2,H2,foot=340,120,30;n=max(len(dy),1);mxa=max([r['accrued'] for r in dy]+[1])*1.18;bw=W2/n
   w7=f'<svg viewBox="0 0 {W2} {H2}" width="100%" style="display:block">'
   for i,r in enumerate(dy):
@@ -172,6 +174,7 @@ def _wide(A, FINAL=False):
          f'<text x="{x+w/2:.1f}" y="{yb+27}" text-anchor="middle" font-size="10" fill="{P["muted"]}">{r["orders"]} з</text>')
   w7+='</svg>'
   right+=(f'<div style="{C}"><div style="display:flex;justify-content:space-between;font-size:12px"><b>Начислено за 7 дней</b>'
-          f'<span style="color:{P["muted"]}">{f(sum(r["accrued"] for r in dy))} ₽</span></div>{w7}</div>')
+          f'<span style="color:{P["muted"]}">{f(sum(r["accrued"] for r in dy))} ₽</span></div>'
+          f'<div style="font-size:12px;color:{P["muted"]};margin-top:2px">в среднем <b style="color:{P["text"]}">{f(avg)} ₽</b> в день</div>{w7}</div>')
   return (f'<div style="{FONT}color:{P["text"]};display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start">'
           f'<div style="display:grid;gap:10px;min-width:0">{left}</div><div style="display:grid;gap:10px;min-width:0">{right}</div></div>')
