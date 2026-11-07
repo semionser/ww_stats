@@ -46,10 +46,12 @@ try:
 except Exception:
     SIGNER = {}
 SIGNER_ID = int(SIGNER['id']) if str(SIGNER.get('id', '')).isdigit() else None
+OWNERS = set(USERS)  # люди из ALLOWED_USER_IDS (без подписанта)
 if SIGNER_ID and USERS:
     USERS = USERS | {SIGNER_ID}  # подписант тоже может вызывать команды
 UPD_EVERY = 3 * 3600  # пока нет «ДА», переспрашиваем каждые 3 ч днём
-NOT_SIGNER = 'вы не роман, ваш отец не зарабатывает 300к'
+NOT_SIGNER = 'вы не роман, ваш отец не зарабатывает 300к'  # чужим
+NOT_SIGNER_OWNER = 'Не по статусу)'                         # людям из ALLOWED_USER_IDS
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('bot')
@@ -193,7 +195,8 @@ def on_upd_answer(cq):
     msg = cq.get('message') or {}
     ok = {SIGNER_ID} if SIGNER_ID else USERS
     if ok and cq.get('from', {}).get('id') not in ok:
-        tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': NOT_SIGNER, 'show_alert': True})
+        who = cq.get('from', {}).get('id')
+        tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': NOT_SIGNER_OWNER if who in OWNERS else NOT_SIGNER, 'show_alert': True})
         return
     try:
         _, num, ans = cq.get('data', '').split(':', 2)
