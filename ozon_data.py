@@ -9,12 +9,13 @@ def _products():
     """Названия товаров и группа для отдельного счётчика — только из секрета PRODUCTS_JSON, в коде их нет."""
     try:
         c = json.loads(os.environ['PRODUCTS_JSON'])
-        return c['names'], set(c['group']), c.get('group_label', 'Группа')
+        groups = c.get('caption_groups') or [{'label': c.get('group_label', 'Группа'), 'codes': c['group']}]
+        return c['names'], set(c['group']), c.get('group_label', 'Группа'), groups
     except Exception:
         raise SystemExit('PRODUCTS_JSON не задан или испорчен')
 
 
-NAMES, GROUP, GROUP_LABEL = _products()
+NAMES, GROUP, GROUP_LABEL, CAPTION_GROUPS = _products()
 
 
 def call(path, body):
@@ -98,4 +99,4 @@ def collect(final_day=None):
     for k in sorted(set(items) | GROUP, key=lambda k: (-items[k][0] if k in items else 0, k)):
         v = items.get(k, [0, 0, 0.0]); avg = week[k] / 7
         it.append({"code": k, "item": NAMES.get(k, k), "orders": v[0], "cancelled": v[1], "sum": round(v[2]), "stock": stock.get(k, 0), "avg7": round(avg, 1), "cover": round(stock.get(k, 0) / avg) if avg else None})
-    return {"group_label": GROUP_LABEL, "summary": summary, "items": it, "days": days, "hours": hours}
+    return {"group_label": GROUP_LABEL, "caption_groups": CAPTION_GROUPS, "summary": summary, "items": it, "days": days, "hours": hours}

@@ -11,7 +11,7 @@
 - только исходящие запросы (long polling), никаких открытых портов и вебхуков;
 - ключи только из переменных окружения, в лог не пишутся.
 """
-import datetime, json, logging, os, sys, tempfile, threading, time, urllib.request, urllib.error, uuid
+import datetime, html, json, logging, os, sys, tempfile, threading, time, urllib.request, urllib.error, uuid
 
 _missing = [k for k in ('TELEGRAM_BOT_TOKEN', 'ALLOWED_CHAT_ID', 'OZON_CLIENT_ID', 'OZON_API_KEY', 'PRODUCTS_JSON') if not os.environ.get(k)]
 if _missing and sys.argv[1:2] != ['test']:
@@ -67,17 +67,17 @@ fmt = lambda v: f'{v:,.0f}'.replace(',', ' ')
 
 
 def caption(A, final):
+    """Подпись под картинкой (Telegram HTML): баланс, начислено за день, заказы с разбивкой по группам и сумма."""
     s = A['summary']
-    d = s['orders_sum'] - s['y_sum']
-    head = f'Итог за {s["updated"][:5]}' if final else f'Ozon на {s["updated"]} МСК'
-    cmp = ''
-    if s['y_sum']:
-        cmp = f', на {abs(d) / s["y_sum"] * 100:.0f}% {"больше" if d >= 0 else "меньше"}, чем ' + ('за предыдущий день' if final else 'вчера к этому времени')
-    low = [f'{r["item"]} {r["stock"]} шт' for r in A['items'] if r['avg7'] >= 0.5 and r['stock'] <= max(3, r['avg7'] * 2)]
-    t = (f'{head}\nЗаказы {s["orders"]} на {fmt(s["orders_sum"])} ₽{cmp}. {A["group_label"]}: {s["group"]}, отмен {s["cancelled"]}.\n'
-         f'Начислено {"+" if s["accrued"] >= 0 else ""}{fmt(s["accrued"])} ₽, баланс {fmt(s["balance"])} ₽.')
-    if low:
-        t += '\nЗаканчиваются: ' + ', '.join(low) + '.'
+    by_code = {r['code']: r['orders'] for r in A['items']}
+    parts = [f'{html.escape(g["label"])} {sum(by_code.get(c, 0) for c in g["codes"])}' for g in A.get('caption_groups', [])]
+    br = f' ({" / ".join(parts)})' if parts else ''
+    acc = ('+' if s['accrued'] > 0 else '') + fmt(s['accrued'])
+    t = (f'Баланс: <b>{fmt(s["balance"])} ₽</b>\n'
+         f'За день: <b>{acc} ₽</b>\n'
+         f'Заказы: <b>{s["orders"]}</b>{br} · <b>{fmt(s["orders_sum"])} ₽</b>')
+    if final:
+        t = f'<b>Итог за {s["updated"][:5]}</b>\n' + t
     return t
 
 
@@ -102,7 +102,7 @@ def send_dashboard(final_day=None):
                 return
             if not final_day:
                 cache.update(t=time.time(), png=png, caption=cap)
-    tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': cap}, files={'photo': ('ozon.png', png)})
+    tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': cap, 'parse_mode': 'HTML'}, files={'photo': ('ozon.png', png)})
 
 
 def load_state():
