@@ -204,9 +204,18 @@ def supplies(done_days=14, done_max=3):
         for s in o.get('supplies') or []:
             if s.get('bundle_id'):
                 items += _bundle(s['bundle_id'])
-        out.append({"number": o.get('order_number') or str(o['order_id']), "state": o['state'],
+        out.append({"id": o['order_id'], "number": o.get('order_number') or str(o['order_id']), "state": o['state'],
                     "created": ts(o.get('created_date')), "updated": upd, "slot": ts(slot),
                     "dropoff": (o.get('drop_off_warehouse') or {}).get('name') or '',
                     "storage": [x for x in stor if x],
                     "items": [(k, q, NAMES.get(k, nm)) for k, q, nm in items]})
+    return out
+
+
+def supply_states(ids):
+    """Текущий статус поставок по их order_id: {order_id: state}."""
+    out = {}
+    for i in range(0, len(ids), 50):
+        for o in call('/v3/supply-order/get', {"order_ids": ids[i:i + 50]}).get('orders') or []:
+            out[o['order_id']] = o['state']
     return out

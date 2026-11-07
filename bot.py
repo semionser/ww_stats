@@ -2,8 +2,8 @@
 
 Команды в разрешённой группе: /now, /Now, /щас — дашборд; /supply, /поставки — поставки на склады Ozon
 (также с @имя_бота). Каждый день в DAILY_TIME (МСК) присылает итог за вчера.
-Сам пишет в группу (с 08:00 до 24:00 МСК), когда товар закончился, когда запаса осталось меньше 5 дней
-и когда заказов нет 3+ часа, хотя обычно за это время их 4+.
+Сам пишет в группу (с 08:00 до 24:00 МСК), когда товар закончился, когда запаса осталось меньше 5 дней,
+когда заказов нет 3+ часа, хотя обычно за это время их 4+, и когда у поставки сменился статус.
 
 Безопасность:
 - работает только в одном чате (ALLOWED_CHAT_ID); из любых других чатов сразу выходит и ничего не отвечает;
@@ -19,7 +19,7 @@ _missing = [k for k in ('TELEGRAM_BOT_TOKEN', 'ALLOWED_CHAT_ID', 'OZON_CLIENT_ID
 if _missing and sys.argv[1:2] != ['test']:
     sys.exit('Не заданы секреты: ' + ', '.join(_missing))
 
-from ozon_data import collect, MSK, NAMES, watch, supplies
+from ozon_data import collect, MSK, NAMES, watch, supplies, supply_states, SUPPLY_ACTIVE
 from widget import widget_html
 from render import to_png
 
@@ -150,12 +150,33 @@ def scheduler():
 
 
 # ---------- поставки ----------
+# этапы поставки по порядку: шкала 🟩🟩🟩⬜⬜⬜⬜ показывает, сколько пройдено
+SUPPLY_STEPS = ['DATA_FILLING', 'READY_TO_SUPPLY', 'ACCEPTED_AT_SUPPLY_WAREHOUSE', 'IN_TRANSIT',
+                'ACCEPTANCE_AT_STORAGE_WAREHOUSE', 'REPORTS_CONFIRMATION_AWAITING', 'COMPLETED']
 SUPPLY_RU = {'DATA_FILLING': 'заполняется', 'READY_TO_SUPPLY': 'готова к отгрузке',
              'ACCEPTED_AT_SUPPLY_WAREHOUSE': 'принята в точке отгрузки', 'IN_TRANSIT': 'едет на склад',
              'ACCEPTANCE_AT_STORAGE_WAREHOUSE': 'приёмка на складе', 'REPORTS_CONFIRMATION_AWAITING': 'ждёт подтверждения актов',
-             'REPORT_REJECTED': 'акт отклонён', 'REJECTED_AT_SUPPLY_WAREHOUSE': 'отказ в приёмке', 'COMPLETED': 'принята'}
+             'COMPLETED': 'принята на складе', 'REPORT_REJECTED': 'акт отклонён',
+             'REJECTED_AT_SUPPLY_WAREHOUSE': 'отказ в точке отгрузки', 'CANCELLED': 'отменена', 'OVERDUE': 'просрочена'}
+SUPPLY_ICON = {'DATA_FILLING': '📝', 'READY_TO_SUPPLY': '📦', 'ACCEPTED_AT_SUPPLY_WAREHOUSE': '🏭', 'IN_TRANSIT': '🚚',
+               'ACCEPTANCE_AT_STORAGE_WAREHOUSE': '🔍', 'REPORTS_CONFIRMATION_AWAITING': '📄', 'COMPLETED': '✅',
+               'REPORT_REJECTED': '⚠️', 'REJECTED_AT_SUPPLY_WAREHOUSE': '⛔', 'CANCELLED': '❌', 'OVERDUE': '⌛'}
+SUPPLY_FAIL_AT = {'REJECTED_AT_SUPPLY_WAREHOUSE': 3, 'REPORT_REJECTED': 6}  # на каком этапе застряла
 wh = lambda s: ' '.join(w if len(w) <= 2 else w.capitalize() for w in s.replace('_', ' ').split())
 dm = lambda t: t.strftime('%d.%m %H:%M') if t else '—'
+ru = lambda st: SUPPLY_RU.get(st, html.escape(str(st)))
+qty = lambda s: sum(q for _, q, _ in s['items'])
+
+
+def bar(st):
+    n = len(SUPPLY_STEPS)
+    if st in SUPPLY_STEPS:
+        i = SUPPLY_STEPS.index(st) + 1
+        return '🟩' * i + '⬜' * (n - i)
+    if st in SUPPLY_FAIL_AT:
+        i = SUPPLY_FAIL_AT[st]
+        return '🟩' * (i - 1) + '🟥' + '⬜' * (n - i)
+    return '🟥' * n
 
 
 def coming_of(S):
@@ -167,15 +188,40 @@ def coming_of(S):
     return c
 
 
-def supplies_text(W, S):
+def supply_block(num, st, line=None, changed=False, prev=None):
+    """Карточка поставки. changed: отметить 🔔, жирный статус и «было: …»."""
     e = html.escape
+    B = [f'{SUPPLY_ICON.get(st, "📦")} <b>№{e(num)}</b>' + (' 🔔' if changed else ''),
+         f'{bar(st)} ' + (f'<b>{ru(st)}</b>' if changed else ru(st))]
+    if changed:
+        B.append('<i>новая поставка</i>' if prev is None else f'<i>было: {ru(prev)}</i>')
+    if line:
+        B.append(line)
+    return B
+
+
+def supplies_text(W, S, changed=None, gone=()):
+    """changed: {order_id: прежний статус или None для новой}; gone: ушедшие из работы (приняты, отменены)."""
+    e = html.escape; changed = changed or {}
     act = [s for s in S if s['state'] != 'COMPLETED']
-    L = [f'🚚 <b>Поставки в работе: {len(act)}</b>' if act else '🚚 <b>Поставок в работе нет</b>']
+    L = []
+    for g in gone:
+        L += [f'🔔 <b>Поставка №{e(g["number"])}: {ru(g["state"])}</b>']
+    for s in act:
+        if s['id'] in changed:
+            L += [f'🔔 <b>Поставка №{e(s["number"])}: {ru(s["state"])}</b>']
+    for g in gone:
+        B = supply_block(g['number'], g['state'], None, True, g['prev'])
+        B[-1] += f' · <b>{g["qty"]} шт</b>'
+        L += [''] + B
+    if L:
+        L.append('')
+    L.append(f'🚚 <b>Поставки в работе: {len(act)}</b>' if act else '🚚 <b>Поставок в работе нет</b>')
     names = {}
     for s in act:
         where = wh(s['dropoff']) + (' → ' + ', '.join(map(wh, s['storage'])) if s['storage'] else '')
-        L += ['', f'<b>№{e(s["number"])}</b> · {SUPPLY_RU.get(s["state"], e(s["state"]))}',
-              f'слот {dm(s["slot"])} · {e(where)} · <b>{sum(q for _, q, _ in s["items"])} шт</b>']
+        line = f'слот {dm(s["slot"])} · {e(where)} · <b>{qty(s)} шт</b>'
+        L += [''] + supply_block(s['number'], s['state'], line, s['id'] in changed, changed.get(s['id']))
         names.update({k: n for k, _, n in s['items']})
     coming = coming_of(S)
     if coming:
@@ -184,6 +230,35 @@ def supplies_text(W, S):
             n = W['stock'].get(k, 0)
             L.append(f'{e(names[k])}: {n} → <b>{n + coming[k]}</b> (+{coming[k]})')
     return '\n'.join(L)
+
+
+def check_supplies():
+    """Сравнивает статусы поставок с прошлой проверкой; при изменении шлёт сообщение о поставках с отметкой 🔔."""
+    if msk_now().hour < QUIET_UNTIL:  # ночью не пишем: изменения придут утром одним сообщением
+        return
+    S = supplies(done_max=0)
+    cur = {str(s['id']): s for s in S}
+    with slock:
+        st = load_state()
+    first = 'supplies' not in st
+    old = st.get('supplies') or {}
+    new = {i: {'n': s['number'], 's': s['state'], 'q': qty(s)} for i, s in cur.items()}
+    changed = {s['id']: (old[i]['s'] if i in old else None) for i, s in cur.items() if i not in old or old[i]['s'] != s['state']}
+    gone, lost = [], [i for i in old if i not in cur]
+    if lost:
+        now_st = supply_states([int(i) for i in lost])
+        for i in lost:
+            g = now_st.get(int(i))
+            if g is None or g in SUPPLY_ACTIVE:  # сбой выдачи списка: не шумим, проверим в следующий раз
+                new[i] = old[i]
+            else:
+                gone.append({'number': old[i]['n'], 'state': g, 'qty': old[i]['q'], 'prev': old[i]['s']})
+    if not first and (changed or gone):
+        log.info('supply status changed')
+        if not tg('sendMessage', {'chat_id': CHAT_ID, 'text': supplies_text(watch(), S, changed, gone), 'parse_mode': 'HTML'}):
+            return  # не дошло: состояние не сохраняем, повторим через 15 минут
+    with slock:
+        st = load_state(); st['supplies'] = new; save_state(st)
 
 
 def send_supplies():
@@ -275,6 +350,10 @@ def watcher():
             check_alerts()
         except Exception as e:
             log.error('watch: %s', type(e).__name__)
+        try:
+            check_supplies()
+        except Exception as e:
+            log.error('supplies watch: %s', type(e).__name__)
         time.sleep(WATCH_EVERY)
 
 
