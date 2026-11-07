@@ -180,6 +180,24 @@ def _bundle(bundle_id):
     return items
 
 
+def _cargo_tracking(supply_ids):
+    """По коробкам поставки: плановая дата приезда на склад (как «Плановая дата доставки» в кабинете)
+    и сколько коробок уже приехало. {supply_id: {'eta': date|None, 'boxes': n, 'arrived': n}}."""
+    out = {}
+    for i in range(0, len(supply_ids), 100):
+        try:
+            d = call('/v1/cargoes/get', {"supply_ids": supply_ids[i:i + 100]})
+        except RuntimeError:
+            continue  # без сроков карточка всё равно покажется
+        for s in d.get('supply') or []:
+            boxes = s.get('cargoes') or []
+            exp = [x['tracking_info']['date'] for x in boxes if (x.get('tracking_info') or {}).get('type') == 'EXPECTED_ARRIVAL' and x['tracking_info'].get('date')]
+            arr = [x for x in boxes if (x.get('tracking_info') or {}).get('type') == 'ACTUAL_ARRIVAL']
+            out[s['supply_id']] = {'eta': datetime.date.fromisoformat(max(exp)[:10]) if exp else None,
+                                   'boxes': len(boxes), 'arrived': len(arr)}
+    return out
+
+
 def supplies(done_days=14, done_max=3):
     """Поставки FBO: все незавершённые и до done_max завершённых за последние done_days дней, с составом."""
     ts = lambda s: datetime.datetime.fromisoformat(s[:19]) + MSK if s else None
@@ -189,6 +207,7 @@ def supplies(done_days=14, done_max=3):
     ids = active + done
     for i in range(0, len(ids), 50):
         orders += call('/v3/supply-order/get', {"order_ids": ids[i:i + 50]}).get('orders') or []
+    track = _cargo_tracking([s['supply_id'] for o in orders for s in o.get('supplies') or [] if s.get('supply_id')])
     out = []
     since = _now() - datetime.timedelta(done_days)
     n_done = 0
@@ -201,13 +220,19 @@ def supplies(done_days=14, done_max=3):
         slot = ((o.get('timeslot') or {}).get('timeslot') or {}).get('from')
         stor = [((s.get('storage_warehouse') or {}).get('name') or '') for s in o.get('supplies') or []]
         items = []
+        tr = {'eta': None, 'boxes': 0, 'arrived': 0}
         for s in o.get('supplies') or []:
             if s.get('bundle_id'):
                 items += _bundle(s['bundle_id'])
+            t = track.get(s.get('supply_id'))
+            if t:
+                tr['boxes'] += t['boxes']; tr['arrived'] += t['arrived']
+                tr['eta'] = max(filter(None, [tr['eta'], t['eta']]), default=None)
         out.append({"id": o['order_id'], "number": o.get('order_number') or str(o['order_id']), "state": o['state'],
                     "created": ts(o.get('created_date')), "updated": upd, "slot": ts(slot),
                     "dropoff": (o.get('drop_off_warehouse') or {}).get('name') or '',
                     "crossdock": any(s.get('is_crossdock') for s in o.get('supplies') or []),
+                    "eta": tr['eta'], "boxes": tr['boxes'], "boxes_arrived": tr['arrived'],
                     "storage": [x for x in stor if x],
                     "items": [(k, q, NAMES.get(k, nm)) for k, q, nm in items]})
     return out

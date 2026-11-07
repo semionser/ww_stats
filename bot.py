@@ -230,16 +230,28 @@ def dur(td):
 
 
 def timing(s, now, tdays):
-    """Одна строка про сроки: когда сдать, сколько уже едет и когда приедет."""
-    eta = s['slot'] + datetime.timedelta(days=tdays) if s['slot'] and s.get('crossdock') else None
-    when = lambda t: f'<b>~{t:%d.%m}</b>'
+    """Одна строка про сроки: когда сдать, сколько уже едет и когда приедет.
+    Дата приезда — плановая из Ozon (по коробкам); если её нет, оценка по прошлым поставкам с «~»."""
+    if s.get('eta'):
+        eta, mark = s['eta'], ''
+    elif s['slot'] and s.get('crossdock') and tdays:
+        eta, mark = (s['slot'] + datetime.timedelta(days=tdays)).date(), '~'
+    else:
+        eta = None
+    when = lambda d: f'<b>{mark}{d:%d.%m}</b>'
     if s['state'] in BEFORE_DROP and s['slot']:
         return f'сдать {dm(s["slot"])}' + (f' · приедет {when(eta)}' if eta else '')
     if s['state'] in ON_THE_WAY:
-        start = s['updated'] if s['state'] == 'ACCEPTED_AT_SUPPLY_WAREHOUSE' and s['updated'] else s['slot']
-        t = f'в пути {dur(now - start)}' if start and now > start else 'в пути'
+        start = s['updated'] or s['slot']  # когда сдали в точку / когда выехала
+        ago = dur(now - start) if start and now > start else ''
+        if s['state'] == 'ACCEPTED_AT_SUPPLY_WAREHOUSE':
+            t = f'сдали {ago} назад' if ago else 'сдали'
+        else:
+            t = f'в пути {ago}' if ago else 'в пути'
         if eta:
-            t += f' · приедет {when(eta)}' if eta.date() >= now.date() else f' · опаздывает, ждали {when(eta)}'
+            t += f' · приедет {when(eta)}' if eta >= now.date() else f' · опаздывает, план был {when(eta)}'
+        if 0 < s.get('boxes_arrived', 0) < s.get('boxes', 0):
+            t += f' · приехало {s["boxes_arrived"]} из {s["boxes"]} коробок'
         return t
     if s['state'] == 'ACCEPTANCE_AT_STORAGE_WAREHOUSE' and s['updated']:
         return f'на складе с {dm(s["updated"])}'
@@ -264,7 +276,7 @@ def supplies_text(S, changed=None, gone=()):
         L.append('')
     L.append(f'🚚 <b>Поставки в работе: {len(act)}</b>' if act else '🚚 <b>Поставок в работе нет</b>')
     now = msk_now()
-    tdays = transit_days() if any(s.get('crossdock') and s['state'] in BEFORE_DROP + ON_THE_WAY for s in act) else 0
+    tdays = transit_days() if any(s.get('crossdock') and not s.get('eta') and s['state'] in BEFORE_DROP + ON_THE_WAY for s in act) else 0
     for s in act:
         where = wh(s['dropoff']) + (' → ' + ', '.join(map(wh, s['storage'])) if s['storage'] else '')
         B = supply_block(s['number'], s['state'], f'{e(where)} · <b>{qty(s)} шт</b>', s['id'] in changed, changed.get(s['id']))
