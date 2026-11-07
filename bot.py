@@ -200,7 +200,7 @@ def supply_block(num, st, line=None, changed=False, prev=None):
     return B
 
 
-def supplies_text(W, S, changed=None, gone=()):
+def supplies_text(S, changed=None, gone=()):
     """changed: {order_id: прежний статус или None для новой}; gone: ушедшие из работы (приняты, отменены)."""
     e = html.escape; changed = changed or {}
     act = [s for s in S if s['state'] != 'COMPLETED']
@@ -217,18 +217,10 @@ def supplies_text(W, S, changed=None, gone=()):
     if L:
         L.append('')
     L.append(f'🚚 <b>Поставки в работе: {len(act)}</b>' if act else '🚚 <b>Поставок в работе нет</b>')
-    names = {}
     for s in act:
         where = wh(s['dropoff']) + (' → ' + ', '.join(map(wh, s['storage'])) if s['storage'] else '')
         line = f'слот {dm(s["slot"])} · {e(where)} · <b>{qty(s)} шт</b>'
         L += [''] + supply_block(s['number'], s['state'], line, s['id'] in changed, changed.get(s['id']))
-        names.update({k: n for k, _, n in s['items']})
-    coming = coming_of(S)
-    if coming:
-        L += ['', '<b>На складе после приёмки, шт</b>']
-        for k in sorted(coming, key=lambda k: (W['stock'].get(k, 0), names[k])):
-            n = W['stock'].get(k, 0)
-            L.append(f'{e(names[k])}: {n} → <b>{n + coming[k]}</b> (+{coming[k]})')
     return '\n'.join(L)
 
 
@@ -255,7 +247,7 @@ def check_supplies():
                 gone.append({'number': old[i]['n'], 'state': g, 'qty': old[i]['q'], 'prev': old[i]['s']})
     if not first and (changed or gone):
         log.info('supply status changed')
-        if not tg('sendMessage', {'chat_id': CHAT_ID, 'text': supplies_text(watch(), S, changed, gone), 'parse_mode': 'HTML'}):
+        if not tg('sendMessage', {'chat_id': CHAT_ID, 'text': supplies_text(S, changed, gone), 'parse_mode': 'HTML'}):
             return  # не дошло: состояние не сохраняем, повторим через 15 минут
     with slock:
         st = load_state(); st['supplies'] = new; save_state(st)
@@ -269,7 +261,7 @@ def send_demo_acceptance():
         act = [s for s in S if s['state'] != 'COMPLETED']
         for s in act:
             s['state'] = 'ACCEPTANCE_AT_STORAGE_WAREHOUSE'
-        text = supplies_text(watch(), S, {s['id']: 'IN_TRANSIT' for s in act})
+        text = supplies_text(S, {s['id']: 'IN_TRANSIT' for s in act})
     except Exception as e:
         log.error('demo failed: %s', type(e).__name__)
         return
@@ -282,7 +274,7 @@ def send_supplies():
     with lock:
         if not (scache['text'] and time.time() - scache['t'] < COOLDOWN):
             try:
-                text = supplies_text(watch(), supplies(done_max=0))
+                text = supplies_text(supplies(done_max=0))
             except Exception as e:
                 log.error('supplies failed: %s', type(e).__name__)
                 tg('sendMessage', {'chat_id': CHAT_ID, 'text': 'Не получилось забрать поставки из Ozon, попробуйте через пару минут.'})
@@ -471,7 +463,7 @@ def main():
 
 if __name__ == '__main__':
     if sys.argv[1:3] == ['test', 'supply']:  # python3 bot.py test supply → текст /supply, без Telegram
-        print(supplies_text(watch(), supplies(done_max=0)))
+        print(supplies_text(supplies(done_max=0)))
     elif len(sys.argv) > 1 and sys.argv[1] == 'test':  # python3 bot.py test [final] → картинка в test.png, без Telegram
         fd = (datetime.datetime.now(datetime.UTC).replace(tzinfo=None) + MSK).date() - datetime.timedelta(1) if 'final' in sys.argv else None
         png, cap = build(fd); open('test.png', 'wb').write(png); print(cap)
