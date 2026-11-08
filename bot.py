@@ -479,15 +479,16 @@ def send_demo_acceptance():
     try:
         S = supplies(done_max=0)
         act = [s for s in S if s['state'] != 'COMPLETED']
-        for s in act:
-            s['state'] = 'ACCEPTANCE_AT_STORAGE_WAREHOUSE'
-        text = supplies_text(S, {s['id']: 'IN_TRANSIT' for s in act})
+        if not act:
+            return
+        s = act[0]  # как будто одна поставка только что доехала и встала на приёмку
+        s['state'], s['updated'] = 'ACCEPTANCE_AT_STORAGE_WAREHOUSE', msk_now()
+        text = supplies_text(S, {s['id']: 'IN_TRANSIT'})
     except Exception as e:
         log.error('demo failed: %s', type(e).__name__)
         return
     log.info('demo message')
-    tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML',
-                       'text': '🧪 <i>Пример, статусы выдуманы: так придёт сообщение, когда поставки дойдут до приёмки на складе.</i>\n\n' + text})
+    tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML', 'text': '🧪 <i>Пример, статус выдуман</i>\n\n' + text})
 
 
 def send_supplies():
@@ -693,11 +694,12 @@ def main():
                 st['join_warned'] = today; save_state(st)
         if warn:
             tg('sendMessage', {'chat_id': CHAT_ID, 'text': '⚠️ Бота сейчас можно добавить в любую группу. Закройте это: @BotFather → /setjoingroups → выбрать бота → Disable.'})
-    if os.environ.get('DEMO') == 'supply_acceptance':
+    demo = set((os.environ.get('DEMO') or '').split('+'))  # можно несколько: supply_acceptance+upd
+    if 'supply_acceptance' in demo:
         send_demo_acceptance()
-    if os.environ.get('DEMO') == 'upd':
+    if 'upd' in demo:
         demo_upd_question()
-    if os.environ.get('DEMO') == 'upd_yes':
+    if 'upd_yes' in demo:
         demo_upd_yes()
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=watcher, daemon=True).start()
