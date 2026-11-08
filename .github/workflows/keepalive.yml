@@ -1,0 +1,23 @@
+name: keepalive
+# GitHub сам выключает расписания в публичном репозитории, если 60 дней не было коммитов, —
+# тогда serve перестал бы перезапускаться и бот замолчал. Раз в неделю заново включаем оба workflow
+# через API, это сбрасывает счётчик. Здесь нет секретов и не выполняется код из репозитория:
+# у токена только право управлять workflow этого репозитория.
+on:
+  schedule:
+    - cron: "40 6 * * 1"
+  workflow_dispatch:
+permissions:
+  actions: write
+jobs:
+  keepalive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api -X PUT "repos/$REPO/actions/workflows/serve.yml/enable"
+          gh api -X PUT "repos/$REPO/actions/workflows/keepalive.yml/enable"
+          echo "ok"

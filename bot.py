@@ -40,6 +40,9 @@ DAY_FROM, DAY_TO = 10, 22      # «днём» = с 10:00 до 22:00 МСК; па
 PRICE_JUMP = 0.10              # тревога, если цена товара сдвинулась на 10%+ от последней известной
 QUIET_UNTIL = 8                # с 00:00 до 08:00 МСК бот сам не пишет
 COOLDOWN = 60  # сек.: чаще одного раза в минуту не дёргаем Ozon, повторяем последнюю картинку
+DAILY_TRIES, DAILY_RETRY = 6, 600   # итог за вчера: если Ozon не ответил, ещё 5 попыток раз в 10 мин
+OZON_DOWN_WARN = 3600               # Ozon не отвечает час подряд — один раз пишем в группу
+TG_LIMIT = 4000                     # Telegram режет сообщения длиннее 4096 символов
 # Кто подписывает УПД — только из секрета UPD_SIGNER, в коде нет. Один подписант или список:
 # {"id": ..., "username": ..., "name": ...}  или  [{...}, {...}]
 try:
@@ -61,7 +64,8 @@ log = logging.getLogger('bot')
 # Любая непойманная ошибка пишется в лог только типом: текст исключения может содержать данные.
 sys.excepthook = lambda t, v, tb: log.error('fatal: %s', t.__name__)
 threading.excepthook = lambda a: log.error('thread error: %s', a.exc_type.__name__)
-lock = threading.Lock()
+lock = threading.Lock()   # /now: картинка рисуется по одной
+sup_lock = threading.Lock()  # /supply — отдельно, чтобы не ждать картинку
 slock = threading.Lock()  # state.json пишут несколько потоков
 cache = {'t': 0, 'png': None, 'caption': ''}
 scache = {'t': 0, 'text': ''}
@@ -90,6 +94,29 @@ def tg(method, data=None, files=None, timeout=70):
     return None
 
 
+def tg_retry(method, data=None, tries=10):
+    """Для старта: короткий сбой связи не должен ронять бота до следующего запуска (до 2 ч)."""
+    for i in range(tries):
+        r = tg(method, data)
+        if r is not None:
+            return r
+        time.sleep(min(60, 5 * (i + 1)))
+    return None
+
+
+def send_text(text):
+    """sendMessage (HTML). Длинный текст делим по пустым строкам на части, чтобы влезть в лимит Telegram.
+    True, если дошли все части."""
+    parts, cur = [], ''
+    for block in text.split('\n\n'):
+        if cur and len(cur) + 2 + len(block) > TG_LIMIT:
+            parts.append(cur); cur = block
+        else:
+            cur = f'{cur}\n\n{block}' if cur else block
+    parts.append(cur)
+    return all([tg('sendMessage', {'chat_id': CHAT_ID, 'text': p, 'parse_mode': 'HTML'}) for p in parts])
+
+
 fmt = lambda v: f'{v:,.0f}'.replace(',', ' ')
 
 
@@ -116,7 +143,8 @@ def build(final_day=None):
         return open(p, 'rb').read(), caption(A, bool(final_day))
 
 
-def send_dashboard(final_day=None):
+def send_dashboard(final_day=None, quiet=False):
+    """True, если картинка дошла. quiet: при ошибке не писать в группу (итог за вчера сам повторит попытку)."""
     with lock:
         if not final_day and cache['png'] and time.time() - cache['t'] < COOLDOWN:
             png, cap = cache['png'], cache['caption']
@@ -125,13 +153,15 @@ def send_dashboard(final_day=None):
                 png, cap = build(final_day)
             except Exception as e:
                 log.error('build failed: %s', type(e).__name__)
-                tg('sendMessage', {'chat_id': CHAT_ID, 'text': 'Не получилось забрать данные Ozon, попробуйте через пару минут.'})
-                return
+                if not quiet:
+                    tg('sendMessage', {'chat_id': CHAT_ID, 'text': 'Не получилось забрать данные Ozon, попробуйте через пару минут.'})
+                return False
             if not final_day:
                 cache.update(t=time.time(), png=png, caption=cap)
     r = tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': cap, 'parse_mode': 'HTML'}, files={'photo': ('ozon.png', png)})
     if r and not final_day:
         replace_now(r['message_id'])
+    return bool(r)
 
 
 def replace_now(new_id):
@@ -303,16 +333,24 @@ def on_upd_answer(cq):
 
 def scheduler():
     hh, mm = map(int, DAILY.split(':'))
+    tries = {'day': None, 'n': 0, 't': 0.0}  # попытки итога за вчера в этом запуске
     while True:
       try:
-        now = msk_now(); due = False
+        now = msk_now(); today = str(now.date())
         with slock:
-            st = load_state()
-            if (now.hour, now.minute) >= (hh, mm) and st.get('daily') != str(now.date()):
-                st['daily'] = str(now.date()); save_state(st); due = True
-        if due:
-            log.info('daily report')
-            send_dashboard(final_day=now.date() - datetime.timedelta(1))
+            sent = load_state().get('daily') == today
+        if tries['day'] != today:
+            tries.update(day=today, n=0, t=0.0)
+        if not sent and (now.hour, now.minute) >= (hh, mm) and time.time() - tries['t'] >= DAILY_RETRY:
+            tries['n'] += 1; tries['t'] = time.time()
+            last = tries['n'] >= DAILY_TRIES
+            log.info('daily report, try %s', tries['n'])
+            ok = send_dashboard(final_day=now.date() - datetime.timedelta(1), quiet=True)
+            if ok or last:
+                with slock:
+                    st = load_state(); st['daily'] = today; save_state(st)
+            if not ok and last:
+                tg('sendMessage', {'chat_id': CHAT_ID, 'text': '⚠️ Итог за вчера не собрался: Ozon не отвечал целый час.'})
         check_upd()
       except Exception as e:
         log.error('scheduler: %s', type(e).__name__)
@@ -475,7 +513,7 @@ def check_supplies():
                and s['state'] in ('ACCEPTANCE_AT_STORAGE_WAREHOUSE', 'REPORTS_CONFIRMATION_AWAITING')]
     if not first and (changed or gone):
         log.info('supply status changed')
-        if not tg('sendMessage', {'chat_id': CHAT_ID, 'text': supplies_text(S, changed, gone), 'parse_mode': 'HTML'}):
+        if not send_text(supplies_text(S, changed, gone)):
             return  # не дошло: состояние не сохраняем, повторим через 15 минут
         for g in gone:
             if g['state'] == 'COMPLETED':
@@ -502,11 +540,11 @@ def send_demo_acceptance():
         log.error('demo failed: %s', type(e).__name__)
         return
     log.info('demo message')
-    tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML', 'text': '🧪 <i>Пример, статус выдуман</i>\n\n' + text})
+    send_text('🧪 <i>Пример, статус выдуман</i>\n\n' + text)
 
 
 def send_supplies():
-    with lock:
+    with sup_lock:
         if not (scache['text'] and time.time() - scache['t'] < COOLDOWN):
             try:
                 text = supplies_text(supplies(done_max=0))
@@ -516,7 +554,7 @@ def send_supplies():
                 return
             scache.update(t=time.time(), text=text)
         text = scache['text']
-    tg('sendMessage', {'chat_id': CHAT_ID, 'text': text, 'parse_mode': 'HTML'})
+    send_text(text)
 
 
 # ---------- тревоги ----------
@@ -615,17 +653,44 @@ def check_alerts():
         tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML', 'text': '\n'.join(T)})
 
 
+def ozon_health(ok):
+    """Проверки тревог и поставок падают час подряд — один раз пишем в группу, что они сейчас не работают
+    (истёк ключ Ozon, сбой API). Когда снова заработало — пишем и об этом."""
+    now = msk_now(); say = None
+    with slock:
+        st = load_state(); h = st.get('ozon') or {}
+        if ok:
+            if h.get('warned'):
+                say = '✅ Ozon снова отвечает: тревоги и поставки проверяются.'
+            h = {}
+        else:
+            h.setdefault('since', now.isoformat())
+            since = datetime.datetime.fromisoformat(h['since'])
+            if not h.get('warned') and (now - since).total_seconds() >= OZON_DOWN_WARN and now.hour >= QUIET_UNTIL:
+                h['warned'] = True
+                say = (f'⚠️ С {since:%H:%M} не получается проверить Ozon: тревоги и поставки сейчас не приходят. '
+                       'Если не пройдёт само, проверьте ключ API в кабинете Ozon.')
+        st['ozon'] = h; save_state(st)
+    if say:
+        tg('sendMessage', {'chat_id': CHAT_ID, 'text': say})
+
+
 def watcher():
     time.sleep(90)
     while True:
+        ok = True
         try:
             check_alerts()
         except Exception as e:
-            log.error('watch: %s', type(e).__name__)
+            ok = False; log.error('watch: %s', type(e).__name__)
         try:
             check_supplies()
         except Exception as e:
-            log.error('supplies watch: %s', type(e).__name__)
+            ok = False; log.error('supplies watch: %s', type(e).__name__)
+        try:
+            ozon_health(ok)
+        except Exception as e:
+            log.error('health: %s', type(e).__name__)
         time.sleep(WATCH_EVERY)
 
 
@@ -679,7 +744,7 @@ def handle(u):
 
 def main():
     global ME
-    me = tg('getMe')
+    me = tg_retry('getMe')
     if not me:
         sys.exit('Неверный TELEGRAM_BOT_TOKEN или нет связи с Telegram')
     ME = me['username']
@@ -688,12 +753,12 @@ def main():
     join_warning = bool(me.get('can_join_groups'))
     if join_warning:
         log.warning('can_join_groups is on')
-    chat = tg('getChat', {'chat_id': CHAT_ID})
+    chat = tg_retry('getChat', {'chat_id': CHAT_ID})
     if not chat:
         sys.exit('Бот не состоит в группе ALLOWED_CHAT_ID')
     if chat.get('username'):
         sys.exit('Группа публичная (есть @адрес): сделайте её частной')
-    mine = tg('getChatMember', {'chat_id': CHAT_ID, 'user_id': me['id']}) or {}
+    mine = tg_retry('getChatMember', {'chat_id': CHAT_ID, 'user_id': me['id']}) or {}
     if mine.get('status') == 'administrator':
         sys.exit('Бот — админ группы и получает всю переписку: снимите админку')
     tg('deleteWebhook', {'drop_pending_updates': False})  # команды, пришедшие между запусками, не теряем
