@@ -102,6 +102,59 @@ def collect(final_day=None):
     return {"group_label": GROUP_LABEL, "caption_groups": CAPTION_GROUPS, "summary": summary, "items": it, "days": days, "hours": hours}
 
 
+def collect_period(n):
+    """Дашборд за n последних дней, включая сегодня (7 — неделя, 30 — месяц).
+    Сравниваем с n днями перед ними, обрезанными на тот же момент: сегодня ещё не кончился, иначе нечестно."""
+    now = _now(); today = now.date()
+    start = today - datetime.timedelta(n - 1); pstart = start - datetime.timedelta(n)
+    cut = now - datetime.timedelta(n)        # тот же час n дней назад
+    w7 = today - datetime.timedelta(6)        # запас считаем как везде: по продажам за 7 дней
+    posts = _posts(datetime.datetime.combine(pstart, datetime.time()), now)
+    D = {start + datetime.timedelta(i): [0, 0.0, 0, 0] for i in range(n)}   # заказы, сумма, отмены, группа
+    P = {pstart + datetime.timedelta(i): 0 for i in range(n)}               # заказы прошлого периода
+    items = collections.defaultdict(lambda: [0, 0, 0.0]); week = collections.Counter()
+    prev = [0, 0.0, 0]; last = None
+    for x in posts:
+        t = datetime.datetime.fromisoformat(x['created_at'][:19]) + MSK; day = t.date()
+        bad = x['status'] == 'cancelled'
+        for p in x['products']:
+            q = p['quantity']; pr = float(p['price']['amount'] if isinstance(p['price'], dict) else p['price']); oid = p['offer_id']
+            if day in D:
+                if bad:
+                    D[day][2] += q; items[oid][1] += q
+                else:
+                    D[day][0] += q; D[day][1] += pr * q; items[oid][0] += q; items[oid][2] += pr * q
+                    if oid in GROUP: D[day][3] += q
+                    if day >= w7: week[oid] += q
+            elif day in P and not bad and t <= cut:
+                P[day] += q; prev[0] += q; prev[1] += pr * q
+                if oid in GROUP: prev[2] += q
+        if day in D and not bad and (last is None or t > last): last = t
+    stock = _stock()
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(5) as ex:  # по запросу на день; параллельно, иначе месяц собирается ~15 с
+        fin = dict(zip(D, ex.map(lambda d: call('/v1/finance/balance', {"date_from": str(d), "date_to": str(d)}), D)))
+    days = [{"day": str(d), "accrued": round(fin[d]['total']['accrued']['value']), "orders": v[0], "orders_sum": round(v[1]), "cancelled": v[2], "group": v[3]} for d, v in D.items()]
+    tot = lambda j: sum(v[j] for v in D.values())
+    summary = {"balance": round(fin[today]['total']['closing_balance']['value']),
+               "opening": round(fin[start]['total']['opening_balance']['value']),
+               "accrued": sum(r['accrued'] for r in days),  # как сумма столбиков «Начислено по дням»
+               "sales": round(sum(fin[d]['cashflows']['sales']['amount']['value'] for d in D)),
+               "returns": round(sum(fin[d]['cashflows']['returns']['amount']['value'] for d in D)),
+               "orders": tot(0), "orders_sum": round(tot(1)), "cancelled": tot(2), "group": tot(3),
+               "y_orders": prev[0], "y_sum": round(prev[1]), "y_group": prev[2],
+               "last_order": last.strftime('%H:%M') if last else '—',
+               "updated": today.strftime('%d.%m') + ' ' + now.strftime('%H:%M'), "hour": now.hour}
+    cum = lambda a: [sum(a[:i + 1]) for i in range(len(a))]
+    it = []
+    for k in sorted(set(items) | GROUP, key=lambda k: (-items[k][0] if k in items else 0, k)):
+        v = items.get(k, [0, 0, 0.0]); avg = week[k] / 7
+        it.append({"code": k, "item": NAMES.get(k, k), "orders": v[0], "cancelled": v[1], "sum": round(v[2]), "stock": stock.get(k, 0), "avg7": round(avg, 1), "cover": round(stock.get(k, 0) / avg) if avg else None})
+    return {"group_label": GROUP_LABEL, "caption_groups": CAPTION_GROUPS, "summary": summary, "items": it, "days": days,
+            "trend": {"cur": cum([v[0] for v in D.values()]), "prev": cum(list(P.values()))},
+            "period": {"n": n, "from": str(start), "to": str(today), "prev_from": str(pstart), "prev_to": str(start - datetime.timedelta(1))}}
+
+
 def _now():
     return datetime.datetime.now(datetime.UTC).replace(tzinfo=None) + MSK
 

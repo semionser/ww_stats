@@ -90,64 +90,84 @@ def widget_html(A, FINAL=False, wide=False):
 # ---------- широкий вид для Telegram: баланс главный, две колонки ----------
 PAL = dict(card='#f3f4f6', text='#111418', sub='#4b5563', muted='#8a93a0', grid='#e5e7eb',
            accent='#2a78d6', yest='#a3abb6', bar='#d5dae1', good='#15803d', warn='#b45309', bad='#dc2626')
+plural=lambda n,a,b,c:a if n%10==1 and n%100!=11 else (b if 2<=n%10<=4 and not 12<=n%100<=14 else c)
+ROWS = 12  # за 7/30 дней в таблице столько товаров, остальные — одной строкой «ещё N»
 FONT = "font-family:Inter,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;font-variant-numeric:tabular-nums;"
 
 
 def _wide(A, FINAL=False):
+  """Сегодня (или итог за день), а с A['period'] — то же самое за 7/30 дней: вместо часов — дни."""
   P=PAL;esc=html.escape
-  s=A['summary'];it=A['items'];dy=A['days'];hr=A['hours']
+  s=A['summary'];it=A['items'];dy=A['days'];pd=A.get('period')
+  dm=lambda d:d[8:]+'.'+d[5:7]
   day=s['updated'][:5];tm=s['updated'][6:]
-  prevday=dy[-2]['day'][8:]+'.'+dy[-2]['day'][5:7] if len(dy)>1 else 'вчера'
+  prevday=dm(dy[-2]['day']) if len(dy)>1 else 'вчера'
   cmp=f'к {prevday}' if FINAL else 'к вчера'
+  if pd: n=pd['n'];span=f'{n} дней'
   cur=23 if FINAL else s['hour']
   f=lambda v:f"{v:,.0f}".replace(',',' ')
-  k=lambda v:(f'{v/1000:.1f}k' if abs(v)<100000 else f'{v/1000:.0f}k').replace('.0k','k').replace('-','−')
+  k=lambda v:(f'{v/1e6:.2f}M' if abs(v)>=1e6 else f'{v/1000:.1f}k' if abs(v)<100000 else f'{v/1000:.0f}k').replace('.0k','k').replace('-','−')
   sg=lambda v:('+' if v>0 else ('−' if v<0 else '±'))+f(abs(v))
   col=lambda d:P['good'] if d>0 else (P['bad'] if d<0 else P['muted'])
   by_code={r['code']:r['orders'] for r in it}
   gc='/'.join(str(sum(by_code.get(c,0) for c in g['codes'])) for g in A.get('caption_groups',[]))
   C=f'background:{P["card"]};border-radius:14px;padding:14px 16px;'
+  if pd: when=f'<b style="color:{P["text"]}">{span}</b> · {dm(pd["from"])}–{dm(pd["to"])} · {tm}'
+  else: when=f'итог за {day}' if FINAL else f'{day} · {tm} МСК'
   # баланс и начислено за день
   left=(f'<div style="{C}">'
-        f'<div style="display:flex;justify-content:space-between;color:{P["muted"]};font-size:12px"><span>Баланс</span><span>{f"итог за {day}" if FINAL else f"{day} · {tm} МСК"}</span></div>'
+        f'<div style="display:flex;justify-content:space-between;color:{P["muted"]};font-size:12px"><span>Баланс</span><span>{when}</span></div>'
         f'<div style="font-size:40px;font-weight:700;letter-spacing:-.5px;line-height:1.1;margin-top:2px;white-space:nowrap">{f(s["balance"])} ₽</div>'
         f'<div style="margin-top:8px;font-size:24px;font-weight:700;color:{col(s["accrued"])};white-space:nowrap">{sg(s["accrued"])} ₽</div>'
-        f'<div style="color:{P["muted"]};font-size:12px">начислено за день · продажи {f(s["sales"])}</div></div>')
+        f'<div style="color:{P["muted"]};font-size:12px">начислено за {span if pd else "день"} · продажи {f(s["sales"])}</div></div>')
   # три плитки
   do=s['orders']-s['y_orders']
   ds=s['orders_sum']-s['y_sum']
-  pct=f'({"+" if ds>=0 else "−"}{abs(ds)/s["y_sum"]*100:.0f}%)' if s['y_sum'] else ''
+  pc=lambda d,b:f'({"+" if d>=0 else "−"}{abs(d)/b*100:.0f}%)' if b else ''
+  pct=pc(ds,s['y_sum'])
+  # за период подпись «к прошлым N дням» не влезает — там % , а с чем сравниваем, видно в легенде графика ниже
   tiles=[('Заказы',f'{s["orders"]}'+(f' <span style="font-size:13px;color:{P["muted"]};font-weight:500">({gc})</span>' if gc else ''),
-          f'<span style="color:{col(do)};font-weight:600">{sg(do)}</span> <span style="color:{P["muted"]}">{cmp}</span>'),
+          f'<span style="color:{col(do)};font-weight:600">{sg(do)}</span> <span style="color:{P["muted"] if not pd else col(do)}">{pc(do,s["y_orders"]) if pd else cmp}</span>'),
          ('Сумма заказов',k(s['orders_sum'])+' ₽',f'<span style="color:{col(ds)};font-weight:600">{pct}</span>'),
-         ('Отмены',str(s['cancelled']),f'<span style="color:{P["muted"]}">посл. заказ {s["last_order"]}</span>')]
-  left+=('<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">'
+         ('Отмены',str(s['cancelled']),f'<span style="color:{P["muted"]}">'+(f'{s["cancelled"]/(s["orders"]+s["cancelled"])*100:.0f}% от заказов' if pd and s['orders']+s['cancelled'] else f'посл. заказ {s["last_order"]}')+'</span>')]
+  left+=(f'<div style="display:grid;grid-template-columns:{"max-content max-content minmax(0,1fr)" if pd else "1fr 1fr 1fr"};gap:8px">'
          +''.join(f'<div style="{C}padding:10px 12px;min-width:0"><div style="color:{P["muted"]};font-size:11px">{l}</div><div style="font-size:20px;font-weight:700;margin:2px 0;white-space:nowrap">{v}</div><div style="font-size:11px">{d}</div></div>' for l,v,d in tiles)
          +'</div>')
-  # заказы по часам нарастающим итогом, пунктир — вчера
+  # заказы нарастающим итогом, пунктир — вчера (за период: по дням, пунктир — прошлые n дней на тот же момент)
+  nrows=min(len(it),ROWS+1) if pd else len(it);thin=len(dy)>10
   W,H,L,B,T=340,215,24,18,10
-  t,y=hr['today'][:cur+1],hr['yest']
-  mx=max(max(t),max(y),1)
-  X=lambda i:L+(W-L-8)*i/23
+  if pd:  # за период справа таблица длиннее — растягиваем график, чтобы колонки были вровень
+    H=max(H,215+19*(nrows-8)+(20 if thin else 0))
+    t,y=A['trend']['cur'],A['trend']['prev'];cur=N=n-1
+    ticks=range(n) if n<=7 else [i for i in range(n) if (n-1-i)%7==0]
+    tick=lambda i:dm(dy[i]['day'])
+  else:
+    t,y=A['hours']['today'][:cur+1],A['hours']['yest'];N=23
+    ticks=(0,6,12,18,23);tick=lambda i:f'{i:02d}'
+  mx=max(max(t),max(y),1);L=max(L,10+7*len(str(mx)))
+  X=lambda i:L+(W-L-(20 if pd else 8))*i/N
   Y=lambda v:T+(H-T-B)*(1-v/mx)
   g=f'<svg viewBox="0 0 {W} {H}" width="100%" style="display:block">'
   for v in sorted({0,mx}):
     g+=f'<line x1="{L}" x2="{W-8}" y1="{Y(v):.1f}" y2="{Y(v):.1f}" stroke="{P["grid"]}" stroke-width="1"/><text x="{L-6}" y="{Y(v)+4:.1f}" text-anchor="end" font-size="11" fill="{P["muted"]}">{v}</text>'
-  for i in (0,6,12,18,23):
-    g+=f'<text x="{X(i):.1f}" y="{H-3}" text-anchor="middle" font-size="11" fill="{P["muted"]}">{i:02d}</text>'
+  for i in ticks:
+    g+=f'<text x="{X(i):.1f}" y="{H-3}" text-anchor="middle" font-size="11" fill="{P["muted"]}">{tick(i)}</text>'
   py=' '.join(f'{X(i):.1f},{Y(v):.1f}' for i,v in enumerate(y))
   pt=' '.join(f'{X(i):.1f},{Y(v):.1f}' for i,v in enumerate(t))
   g+=(f'<polyline points="{py}" fill="none" stroke="{P["yest"]}" stroke-width="1.5" stroke-dasharray="4 4"/>'
       f'<polygon points="{X(0):.1f},{Y(0):.1f} {pt} {X(cur):.1f},{Y(0):.1f}" fill="{P["accent"]}" opacity=".13"/>'
       f'<polyline points="{pt}" fill="none" stroke="{P["accent"]}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>'
       f'<circle cx="{X(cur):.1f}" cy="{Y(t[-1]):.1f}" r="4" fill="{P["accent"]}" stroke="#ffffff" stroke-width="2"/></svg>')
-  left+=(f'<div style="{C}"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><b>Заказы по часам</b>'
-         f'<span style="color:{P["muted"]}"><span style="color:{P["accent"]}">●</span> {"за день" if FINAL else "сегодня"} {t[-1]} · <span style="color:{P["yest"]}">┅</span> {prevday if FINAL else "вчера"} {y[cur]}</span></div>{g}</div>')
+  if pd: lg=f'{span} {t[-1]} · <span style="color:{P["yest"]}">┅</span> {dm(pd["prev_from"])}–{dm(pd["prev_to"])} {y[-1]}'
+  else: lg=f'{"за день" if FINAL else "сегодня"} {t[-1]} · <span style="color:{P["yest"]}">┅</span> {prevday if FINAL else "вчера"} {y[cur]}'
+  left+=(f'<div style="{C}"><div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px"><b>Заказы по {"дням" if pd else "часам"}</b>'
+         f'<span style="color:{P["muted"]}"><span style="color:{P["accent"]}">●</span> {lg}</span></div>{g}</div>')
   # товары
   mxo=max([r['orders'] for r in it]+[1])
   G='display:grid;grid-template-columns:minmax(0,1fr) 54px 50px 34px 50px;gap:6px;align-items:center'
   rows=f'<div style="{G};font-size:11px;color:{P["muted"]};padding-bottom:4px"><span>Товар</span><span>Заказы</span><span style="text-align:right">Сумма</span><span style="text-align:right">Ост.</span><span style="text-align:right">Запас</span></div>'
-  for r in it:
+  rest=it[ROWS:] if pd and len(it)>ROWS+1 else []  # за период товаров много — хвост одной строкой
+  for r in it[:len(it)-len(rest)]:
     cv=r['cover']
     if cv is None: chip=f'<span style="color:{P["muted"]}">—</span>'
     else:
@@ -159,21 +179,32 @@ def _wide(A, FINAL=False):
            f'<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{esc(r["item"])}</span>'
            f'<span style="white-space:nowrap">{bar}<b>{r["orders"]}</b>{cn}</span><span style="text-align:right">{k(r["sum"])}</span>'
            f'<span style="text-align:right;color:{P["sub"]}">{r["stock"]}</span><span style="text-align:right">{chip}</span></div>')
-  right=f'<div style="{C}"><div style="font-size:13px;margin-bottom:6px"><b>Товары {"за день" if FINAL else "сегодня"}</b></div>{rows}</div>'
-  # начислено за 7 дней; среднее — по полным дням (сегодняшний ещё не закончился)
+  if rest:
+    rows+=(f'<div style="{G};border-top:1px solid {P["grid"]};padding:4px 0;font-size:13px;color:{P["muted"]}">'
+           f'<span style="white-space:nowrap;font-size:12px">ещё {len(rest)} {plural(len(rest),"товар","товара","товаров")}</span><span><b>{sum(r["orders"] for r in rest)}</b></span>'
+           f'<span style="text-align:right">{k(sum(r["sum"] for r in rest))}</span><span></span><span></span></div>')
+  right=f'<div style="{C}"><div style="font-size:13px;margin-bottom:6px"><b>Товары {"за "+span if pd else ("за день" if FINAL else "сегодня")}</b></div>{rows}</div>'
+  # начислено по дням; среднее — по полным дням (сегодняшний ещё не закончился)
   full=dy if FINAL else dy[:-1]
   avg=sum(r['accrued'] for r in full)/len(full) if full else 0
-  W2,H2,foot=340,120,30;n=max(len(dy),1);mxa=max([r['accrued'] for r in dy]+[1])*1.18;bw=W2/n
+  nd=max(len(dy),1)  # за 30 дней столбики тонкие: подписи только у последнего, у максимума и раз в неделю
+  W2,H2,foot=340,(140 if thin else 120),(16 if thin else 30);mxa=max([r['accrued'] for r in dy]+[1])*1.18;bw=W2/nd
+  im=max(range(nd),key=lambda i:dy[i]['accrued'])
+  hb=lambda r:(H2-foot-16)*max(r['accrued'],0)/mxa
+  near=nd-1-im<3 and abs(hb(dy[im])-hb(dy[-1]))<16  # подпись максимума налезла бы на подпись сегодняшнего
   w7=f'<svg viewBox="0 0 {W2} {H2}" width="100%" style="display:block">'
   for i,r in enumerate(dy):
-    last=i==len(dy)-1
+    last=i==nd-1
     bh=max(3,(H2-foot-16)*max(r['accrued'],0)/mxa);w=bw*.62;x=i*bw+(bw-w)/2;yb=H2-foot
-    w7+=(f'<rect x="{x:.1f}" y="{yb-bh:.1f}" width="{w:.1f}" height="{bh:.1f}" rx="4" fill="{P["accent"] if last else P["bar"]}"/>'
-         f'<text x="{x+w/2:.1f}" y="{yb-bh-5:.1f}" text-anchor="middle" font-size="11" font-weight="{600 if last else 400}" fill="{P["text"] if last else P["muted"]}">{k(r["accrued"])}</text>'
-         f'<text x="{x+w/2:.1f}" y="{yb+13}" text-anchor="middle" font-size="11" fill="{P["muted"]}">{r["day"][8:]}.{r["day"][5:7]}</text>'
-         f'<text x="{x+w/2:.1f}" y="{yb+27}" text-anchor="middle" font-size="10" fill="{P["muted"]}">{r["orders"]} з</text>')
+    w7+=f'<rect x="{x:.1f}" y="{yb-bh:.1f}" width="{w:.1f}" height="{bh:.1f}" rx="{2 if thin else 4}" fill="{P["accent"] if last else P["bar"]}"/>'
+    if not thin or last or (i==im and not near):
+      w7+=f'<text x="{min(x+w/2,W2-14):.1f}" y="{yb-bh-5:.1f}" text-anchor="middle" font-size="11" font-weight="{600 if last else 400}" fill="{P["text"] if last else P["muted"]}">{k(r["accrued"])}</text>'
+    if not thin or (nd-1-i)%7==0:
+      w7+=f'<text x="{min(max(x+w/2,15),W2-15):.1f}" y="{yb+13}" text-anchor="middle" font-size="11" fill="{P["muted"]}">{dm(r["day"])}</text>'
+    if not thin:
+      w7+=f'<text x="{x+w/2:.1f}" y="{yb+27}" text-anchor="middle" font-size="10" fill="{P["muted"]}">{r["orders"]} з</text>'
   w7+='</svg>'
-  right+=(f'<div style="{C}"><div style="display:flex;justify-content:space-between;font-size:12px"><b>Начислено за 7 дней</b>'
+  right+=(f'<div style="{C}"><div style="display:flex;justify-content:space-between;font-size:12px"><b>Начислено за {nd} дней</b>'
           f'<span style="color:{P["muted"]}">{f(sum(r["accrued"] for r in dy))} ₽</span></div>'
           f'<div style="font-size:11px;color:{P["muted"]};text-align:right;margin-top:1px">≈ {f(avg)} ₽/день</div>{w7}</div>')
   return (f'<div style="{FONT}color:{P["text"]};display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start">'

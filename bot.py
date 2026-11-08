@@ -1,6 +1,7 @@
 """Телеграм-бот «Ozon сегодня».
 
-Команды в разрешённой группе: /now, /Now, /щас — дашборд; /supply, /поставки — поставки на склады Ozon
+Команды в разрешённой группе: /now, /Now, /щас — дашборд; /now_week, /неделя и /now_month, /месяц — то же за 7 и 30 дней;
+/supply, /поставки — поставки на склады Ozon
 (также с @имя_бота). Каждый день в DAILY_TIME (МСК) присылает итог за вчера.
 После приёмки поставки спрашивает «УПД подписал?» с кнопками ДА/НЕТ и переспрашивает каждые 3 ч днём до «ДА».
 Сам пишет в группу (с 08:00 до 24:00 МСК), когда товар закончился, когда запаса осталось меньше 5 дней,
@@ -20,7 +21,7 @@ _missing = [k for k in ('TELEGRAM_BOT_TOKEN', 'ALLOWED_CHAT_ID', 'OZON_CLIENT_ID
 if _missing and sys.argv[1:2] != ['test']:
     sys.exit('Не заданы секреты: ' + ', '.join(_missing))
 
-from ozon_data import collect, MSK, NAMES, watch, supplies, supply_states, transit_history, prices, SUPPLY_ACTIVE
+from ozon_data import collect, collect_period, MSK, NAMES, watch, supplies, supply_states, transit_history, prices, SUPPLY_ACTIVE
 from widget import widget_html
 from render import to_png
 
@@ -30,9 +31,12 @@ USERS = {int(x) for x in os.environ.get('ALLOWED_USER_IDS', '').replace(' ', '')
 DAILY = os.environ.get('DAILY_TIME', '09:00')
 STATE = os.environ.get('STATE_FILE', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state', 'state.json'))
 SERVE_SECONDS = float(os.environ.get('SERVE_SECONDS', 0))  # 0 = без ограничения; в GitHub Actions ~5 ч 50 мин
-COMMANDS = {'/now': 'now', '/щас': 'now', '/supply': 'supply', '/поставки': 'supply'}
+COMMANDS = {'/now': 'now', '/щас': 'now', '/now_week': 'week', '/неделя': 'week', '/now_month': 'month', '/месяц': 'month',
+            '/supply': 'supply', '/поставки': 'supply'}
 # ответом на сообщение бота: такие ответы Telegram доставляет и в privacy mode
-WORDS = {'щас': 'now', 'ща': 'now', 'сейчас': 'now', 'now': 'now', 'поставки': 'supply', 'supply': 'supply'}
+WORDS = {'щас': 'now', 'ща': 'now', 'сейчас': 'now', 'now': 'now', 'неделя': 'week', 'week': 'week',
+         'месяц': 'month', 'month': 'month', 'поставки': 'supply', 'supply': 'supply'}
+PERIOD_DAYS = {'week': 7, 'month': 30}  # /now_week, /now_month: последние 7 и 30 дней, включая сегодня
 WATCH_EVERY = 15 * 60          # как часто проверять склад и паузу в заказах, сек.
 LOW_DAYS, LOW_RESET = 5, 7     # тревога, когда запас < 5 дн; снова следим, когда поднялся до 7+
 GAP_HOURS = 3                  # тревога, если днём 3+ ч нет ни одного заказа
@@ -67,7 +71,7 @@ threading.excepthook = lambda a: log.error('thread error: %s', a.exc_type.__name
 lock = threading.Lock()   # /now: картинка рисуется по одной
 sup_lock = threading.Lock()  # /supply — отдельно, чтобы не ждать картинку
 slock = threading.Lock()  # state.json пишут несколько потоков
-cache = {'t': 0, 'png': None, 'caption': ''}
+cache = {}  # период → {'t', 'png', 'caption'}: повтор команды в течение минуты не дёргает Ozon
 scache = {'t': 0, 'text': ''}
 ME = ''
 
@@ -121,43 +125,48 @@ fmt = lambda v: f'{v:,.0f}'.replace(',', ' ')
 
 
 def caption(A, final):
-    """Подпись под картинкой (Telegram HTML): баланс, начислено за день, заказы с разбивкой по группам и сумма."""
-    s = A['summary']
+    """Подпись под картинкой (Telegram HTML): баланс, начислено за день (или за период), заказы с разбивкой по группам и сумма."""
+    s = A['summary']; pd = A.get('period')
     by_code = {r['code']: r['orders'] for r in A['items']}
     parts = [str(sum(by_code.get(c, 0) for c in g['codes'])) for g in A.get('caption_groups', [])]
     br = f' ({"/".join(parts)})' if parts else ''
     acc = ('+' if s['accrued'] > 0 else '') + fmt(s['accrued'])
     t = (f'Баланс: <b>{fmt(s["balance"])} ₽</b>\n'
-         f'За день: <b>{acc} ₽</b>\n'
+         f'{"За " + str(pd["n"]) + " дней" if pd else "За день"}: <b>{acc} ₽</b>\n'
          f'Заказы: <b>{s["orders"]}</b>{br} · <b>{fmt(s["orders_sum"])} ₽</b>')
     if final:
         t = f'<b>Итог за {s["updated"][:5]}</b>\n' + t
+    if pd:
+        dm = lambda d: d[8:] + '.' + d[5:7]
+        t = f'<b>{pd["n"]} дней · {dm(pd["from"])}–{dm(pd["to"])}</b>\n' + t
     return t
 
 
-def build(final_day=None):
-    A = collect(final_day)
+def build(final_day=None, period='now'):
+    A = collect_period(PERIOD_DAYS[period]) if period in PERIOD_DAYS else collect(final_day)
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, 'ozon.png')
         to_png(widget_html(A, FINAL=bool(final_day), wide=True), p, wide=True)
         return open(p, 'rb').read(), caption(A, bool(final_day))
 
 
-def send_dashboard(final_day=None, quiet=False):
-    """True, если картинка дошла. quiet: при ошибке не писать в группу (итог за вчера сам повторит попытку)."""
+def send_dashboard(final_day=None, quiet=False, period='now'):
+    """True, если картинка дошла. quiet: при ошибке не писать в группу (итог за вчера сам повторит попытку).
+    period: 'now' — сегодня, 'week'/'month' — последние 7/30 дней."""
     with lock:
-        if not final_day and cache['png'] and time.time() - cache['t'] < COOLDOWN:
-            png, cap = cache['png'], cache['caption']
+        c = cache.get(period)
+        if not final_day and c and time.time() - c['t'] < COOLDOWN:
+            png, cap = c['png'], c['caption']
         else:
             try:
-                png, cap = build(final_day)
+                png, cap = build(final_day, period)
             except Exception as e:
                 log.error('build failed: %s', type(e).__name__)
                 if not quiet:
                     tg('sendMessage', {'chat_id': CHAT_ID, 'text': 'Не получилось забрать данные Ozon, попробуйте через пару минут.'})
                 return False
             if not final_day:
-                cache.update(t=time.time(), png=png, caption=cap)
+                cache[period] = {'t': time.time(), 'png': png, 'caption': cap}
     r = tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': cap, 'parse_mode': 'HTML'}, files={'photo': ('ozon.png', png)})
     if r and not final_day:
         replace_now(r['message_id'])
@@ -165,7 +174,7 @@ def send_dashboard(final_day=None, quiet=False):
 
 
 def replace_now(new_id):
-    """Новый ответ на /now пришёл — прошлые удаляем, в группе остаётся один свежий дашборд.
+    """Новый ответ на /now (или /now_week, /now_month) пришёл — прошлые удаляем, в группе остаётся один свежий дашборд.
     Итог за вчера в 9:00 не трогаем. Свои сообщения бот может удалять только первые 48 часов,
     более старые Telegram не даст удалить — их просто забываем."""
     with slock:
@@ -739,7 +748,10 @@ def handle(u):
     act = is_command(text) or (WORDS.get(text.strip(' /!.').lower()) if is_reply_to_me else None)
     if act:
         log.info('command from allowed chat')
-        threading.Thread(target=send_supplies if act == 'supply' else send_dashboard, daemon=True).start()
+        if act == 'supply':
+            threading.Thread(target=send_supplies, daemon=True).start()
+        else:
+            threading.Thread(target=send_dashboard, kwargs={'period': act}, daemon=True).start()
 
 
 def main():
@@ -762,7 +774,10 @@ def main():
     if mine.get('status') == 'administrator':
         sys.exit('Бот — админ группы и получает всю переписку: снимите админку')
     tg('deleteWebhook', {'drop_pending_updates': False})  # команды, пришедшие между запусками, не теряем
+    # в меню /now, /now_week и /now_month идут подряд: Telegram подсказывает все три, как только набрал /now
     tg('setMyCommands', {'commands': [{'command': 'now', 'description': 'Дашборд Ozon сейчас'},
+                                      {'command': 'now_week', 'description': 'Дашборд за 7 дней'},
+                                      {'command': 'now_month', 'description': 'Дашборд за 30 дней'},
                                       {'command': 'supply', 'description': 'Поставки на склады Ozon'}],
                          'scope': {'type': 'chat', 'chat_id': CHAT_ID}})
     if join_warning:  # предупреждаем в саму группу (не в публичный лог), не чаще раза в день
@@ -804,8 +819,9 @@ def main():
 if __name__ == '__main__':
     if sys.argv[1:3] == ['test', 'supply']:  # python3 bot.py test supply → текст /supply, без Telegram
         print(supplies_text(supplies(done_max=0)))
-    elif len(sys.argv) > 1 and sys.argv[1] == 'test':  # python3 bot.py test [final] → картинка в test.png, без Telegram
+    elif len(sys.argv) > 1 and sys.argv[1] == 'test':  # python3 bot.py test [final|week|month] → картинка в test.png, без Telegram
         fd = (datetime.datetime.now(datetime.UTC).replace(tzinfo=None) + MSK).date() - datetime.timedelta(1) if 'final' in sys.argv else None
-        png, cap = build(fd); open('test.png', 'wb').write(png); print(cap)
+        per = next((a for a in sys.argv[2:] if a in PERIOD_DAYS), 'now')
+        png, cap = build(fd, per); open('test.png', 'wb').write(png); print(cap)
     else:
         main()
