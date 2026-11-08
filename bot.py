@@ -54,6 +54,7 @@ if SIGNER_BY_ID and USERS:
 UPD_EVERY = 3 * 3600  # пока нет «ДА», переспрашиваем каждые 3 ч днём
 NOT_SIGNER = 'вы не роман, ваш отец не зарабатывает 300к'  # чужим
 NOT_SIGNER_OWNER = 'Не по статусу)'                         # людям из ALLOWED_USER_IDS
+UPD_DONE = '#упдподпись Все успешно💋'  # ответ в группу, когда подписант нажал ДА
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 log = logging.getLogger('bot')
@@ -206,8 +207,7 @@ def upd_signed(num, e, msg_id, name):
     what = supply_ref(e.get('n') or num, e.get('q'), e.get('c') or '')
     if e.get('demo'):
         what = f'{what} (🧪 пример)' if e.get('n') else '🧪 пример'
-    head = f'#{name.lower().replace(" ", "")}подписал {name} сделал работу WW 🎉🎉🎉' if name else 'УПД подписан WW 🎉🎉🎉'
-    tg('sendMessage', {'chat_id': CHAT_ID, 'text': f'{head}\nпо поставке {what}', 'reply_to_message_id': msg_id})
+    tg('sendMessage', {'chat_id': CHAT_ID, 'text': f'{UPD_DONE}\nпо поставке {what}', 'reply_to_message_id': msg_id})
 
 
 def demo_upd_question():
