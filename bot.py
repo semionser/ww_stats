@@ -200,14 +200,16 @@ def check_upd():
         ask_upd(n, e.get('q'), city=e.get('c') or '')
 
 
-def upd_signed(num, e, msg_id, name):
-    """ДА: вопрос помечаем «✅ подписан», в группу — поздравление ответом на вопрос."""
-    base = upd_question(num, e.get('q'), bool(e.get('demo')), e.get('c') or '', e.get('n'))
-    tg('editMessageText', {'chat_id': CHAT_ID, 'message_id': msg_id, 'text': base + '\n✅ подписан'})
-    what = supply_ref(e.get('n') or num, e.get('q'), e.get('c') or '')
-    if e.get('demo'):
-        what = f'{what} (🧪 пример)' if e.get('n') else '🧪 пример'
-    tg('sendMessage', {'chat_id': CHAT_ID, 'text': f'{UPD_DONE}\nпо поставке {what}', 'reply_to_message_id': msg_id})
+def upd_signed(num, e, msg_id):
+    """ДА: вопрос сворачиваем в две строки «✅ УПД подписан» + поставка,
+    в группу — одна строка поздравления ответом на него (поставка видна в цитате)."""
+    if e.get('demo') and not e.get('n'):
+        text = '✅ УПД подписан\n🧪 пример, поставка выдумана'
+    else:
+        text = ('✅ УПД подписан' + (' · 🧪 пример' if e.get('demo') else '')
+                + '\nПоставка ' + supply_ref(e.get('n') or num, e.get('q'), e.get('c') or ''))
+    tg('editMessageText', {'chat_id': CHAT_ID, 'message_id': msg_id, 'text': text})
+    tg('sendMessage', {'chat_id': CHAT_ID, 'text': UPD_DONE, 'reply_to_message_id': msg_id})
 
 
 def demo_upd_question():
@@ -236,7 +238,7 @@ def demo_upd_yes():
     with slock:
         st = load_state(); (st.get('upd') or {}).pop('demo', None); save_state(st)
     log.info('demo upd yes')
-    upd_signed('demo', e, e['msg'], (SIGNERS[0] if SIGNERS else {}).get('name', ''))
+    upd_signed('demo', e, e['msg'])
 
 
 def on_upd_answer(cq):
@@ -267,7 +269,7 @@ def on_upd_answer(cq):
     log.info('upd answer')
     if ans == 'y':
         tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': '✅'})
-        upd_signed(num, e, msg.get('message_id'), (SIGNER_BY_ID.get(cq.get('from', {}).get('id')) or {}).get('name', ''))
+        upd_signed(num, e, msg.get('message_id'))
     else:
         if e.get('demo'):
             tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'В примере не переспрашиваю'})
