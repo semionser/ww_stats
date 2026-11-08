@@ -20,4 +20,7 @@ jobs:
         run: |
           gh api -X PUT "repos/$REPO/actions/workflows/serve.yml/enable"
           gh api -X PUT "repos/$REPO/actions/workflows/keepalive.yml/enable"
+          # старые снимки state: бот берёт только самый свежий, остальные удаляем, чтобы в кэше не лежало лишнее
+          gh api "repos/$REPO/actions/caches?key=state-&sort=created_at&direction=desc&per_page=100" \
+            --jq '.actions_caches[1:][].id' | while read -r id; do gh api -X DELETE "repos/$REPO/actions/caches/$id"; done
           echo "ok"
