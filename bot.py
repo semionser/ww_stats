@@ -16,7 +16,7 @@
 - только исходящие запросы (long polling), никаких открытых портов и вебхуков;
 - ключи только из переменных окружения, в лог не пишутся.
 """
-import collections, datetime, html, json, statistics, logging, os, sys, tempfile, threading, time, urllib.request, urllib.error, uuid
+import collections, datetime, hashlib, hmac, html, json, statistics, logging, os, sys, tempfile, threading, time, urllib.request, urllib.error, uuid
 
 _missing = [k for k in ('TELEGRAM_BOT_TOKEN', 'ALLOWED_CHAT_ID', 'OZON_CLIENT_ID', 'OZON_API_KEY', 'PRODUCTS_JSON') if not os.environ.get(k)]
 if _missing and sys.argv[1:2] != ['test']:
@@ -224,9 +224,39 @@ def replace_now(new_id):
             tg('deleteMessage', {'chat_id': CHAT_ID, 'message_id': mid})
 
 
+# state.json лежит в кэше GitHub Actions, а кэш основной ветки может прочитать любой, кто откроет PR в публичный
+# репозиторий. Поэтому файл зашифрован ключом из секретов: поток HMAC-SHA256(ключ, nonce‖счётчик) XOR текст,
+# затем HMAC всего файла (encrypt-then-MAC). Без секретов из него не достать ни артикулы, ни цены, ни поставки.
+# Сменили токен или ключ Ozon — старый файл не расшифруется, бот начнёт с чистого состояния (тревоги заново молча).
+_SK = hashlib.sha256(b'ww-state:' + (os.environ.get('TELEGRAM_BOT_TOKEN', '') + '|' + os.environ.get('OZON_API_KEY', '')).encode()).digest()
+_SK_ENC, _SK_MAC = hmac.new(_SK, b'enc', hashlib.sha256).digest(), hmac.new(_SK, b'mac', hashlib.sha256).digest()
+_MAGIC = b'WWS1'
+
+
+def _stream(nonce, n):
+    return b''.join(hmac.new(_SK_ENC, nonce + i.to_bytes(8, 'big'), hashlib.sha256).digest() for i in range((n + 31) // 32))[:n]
+
+
+def seal(data):
+    nonce = os.urandom(16)
+    ct = bytes(a ^ b for a, b in zip(data, _stream(nonce, len(data))))
+    return _MAGIC + nonce + hmac.new(_SK_MAC, _MAGIC + nonce + ct, hashlib.sha256).digest() + ct
+
+
+def unseal(blob):
+    if blob[:1] == b'{':  # старый незашифрованный файл: прочитаем один раз, дальше сохранится зашифрованным
+        return blob
+    if blob[:4] != _MAGIC or len(blob) < 52:
+        raise ValueError('state format')
+    nonce, tag, ct = blob[4:20], blob[20:52], blob[52:]
+    if not hmac.compare_digest(tag, hmac.new(_SK_MAC, _MAGIC + nonce + ct, hashlib.sha256).digest()):
+        raise ValueError('state tag')
+    return bytes(a ^ b for a, b in zip(ct, _stream(nonce, len(ct))))
+
+
 def load_state():
     try:
-        return json.load(open(STATE))
+        return json.loads(unseal(open(STATE, 'rb').read()))
     except Exception:
         return {}
 
@@ -234,7 +264,8 @@ def load_state():
 def save_state(st):
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     tmp = STATE + '.tmp'
-    json.dump(st, open(tmp, 'w'))
+    with open(tmp, 'wb') as fh:
+        fh.write(seal(json.dumps(st).encode()))
     os.replace(tmp, STATE)
 
 

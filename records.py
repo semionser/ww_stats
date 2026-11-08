@@ -12,7 +12,7 @@
 - вехи: каждые 1000 заказов и каждый миллион ₽ за всё время, каждые 500 000 ₽ заказов за месяц.
 История грузится, только когда нужна (итог в 9:00, вечерняя проверка в 22:00), а не при каждом запуске.
 """
-import collections, datetime, hashlib, os, threading
+import collections, datetime, hashlib, html, os, threading
 
 from ozon_data import _posts, _now, MSK, NAMES, MONTH_NOM, MONTH_GEN
 
@@ -123,7 +123,7 @@ def daily_lines(d):
                        else f'🔥 {fmt(s)} ₽ заказов за день: такого не было с {ddate(since)}')
     # у нового товара первые дни — всегда «рекорд», поэтому только для тех, что продаются 2+ недели
     best = sorted([(q, k) for k, q, was, first in prods if q > was and (d - first).days >= 14], reverse=True)[:3]
-    out += [f'⭐ {NAMES.get(k, k)}: {q} шт за день, личный рекорд' for q, k in best]
+    out += [f'⭐ {html.escape(NAMES.get(k, k))}: {q} шт за день, личный рекорд' for q, k in best]  # строки уходят с parse_mode=HTML
     return out
 
 
