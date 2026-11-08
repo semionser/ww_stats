@@ -161,8 +161,14 @@ def next_ask(t):
     return n
 
 
+def sn(num):
+    """Короткий номер поставки: последние 4 цифры (2000073405642 → 5642). Полный номер есть в кабинете."""
+    s = str(num)
+    return s[-4:] if s.isdigit() and len(s) > 6 else s
+
+
 def supply_ref(num, q, city=''):
-    return f'№{num}' + (f' → {city}' if city else '') + (f' · {q} шт' if q else '')
+    return f'№{sn(num)}' + (f' → {city}' if city else '') + (f' · {q} шт' if q else '')
 
 
 def upd_question(num, q, demo=False, city='', shown=None):
@@ -342,7 +348,7 @@ def coming_of(S):
 def supply_block(num, st, line=None, changed=False, prev=None, city=''):
     """Карточка поставки. city — куда едет. changed: отметить 🔔, жирный статус и «было: …»."""
     e = html.escape
-    B = [f'{SUPPLY_ICON.get(st, "📦")} <b>№{e(num)}' + (f' → {e(city)}' if city else '') + '</b>' + (' 🔔' if changed else ''),
+    B = [f'{SUPPLY_ICON.get(st, "📦")} <b>№{e(sn(num))}' + (f' → {e(city)}' if city else '') + '</b>' + (' 🔔' if changed else ''),
          f'{bar(st)} ' + (f'<b>{ru(st)}</b>' if changed else ru(st))]
     if changed:
         B.append('<i>новая поставка</i>' if prev is None else f'<i>было: {ru(prev)}</i>')
@@ -416,10 +422,10 @@ def supplies_text(S, changed=None, gone=()):
     L = []
     to = lambda c: f' → {e(c)}' if c else ''
     for g in gone:
-        L += [f'🔔 <b>Поставка №{e(g["number"])}{to(g.get("city"))}: {ru(g["state"])}</b>']
+        L += [f'🔔 <b>Поставка №{e(sn(g["number"]))}{to(g.get("city"))}: {ru(g["state"])}</b>']
     for s in act:
         if s['id'] in changed:
-            L += [f'🔔 <b>Поставка №{e(s["number"])}{to(s.get("city"))}: {ru(s["state"])}</b>']
+            L += [f'🔔 <b>Поставка №{e(sn(s["number"]))}{to(s.get("city"))}: {ru(s["state"])}</b>']
     for g in gone:
         B = supply_block(g['number'], g['state'], None, True, g['prev'], g.get('city'))
         B[-1] += f' · <b>{g["qty"]} шт</b>'
