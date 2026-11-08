@@ -1,7 +1,7 @@
 """Телеграм-бот «Ozon сегодня».
 
-Команды в разрешённой группе: /now, /Now, /щас — дашборд; /now_week, /неделя и /now_month, /месяц — то же за 7 и 30 дней;
-/supply, /поставки — поставки на склады Ozon
+Команды в разрешённой группе: /now, /Now, /щас — дашборд, под ним кнопки «Сегодня · 7 дней · 30 дней»
+(та же картинка меняется на месте); /supply, /поставки — поставки на склады Ozon
 (также с @имя_бота). Каждый день в DAILY_TIME (МСК) присылает итог за вчера.
 После приёмки поставки спрашивает «УПД подписал?» с кнопками ДА/НЕТ и переспрашивает каждые 3 ч днём до «ДА».
 Сам пишет в группу (с 08:00 до 24:00 МСК), когда товар закончился, когда запаса осталось меньше 5 дней,
@@ -36,7 +36,8 @@ COMMANDS = {'/now': 'now', '/щас': 'now', '/now_week': 'week', '/неделя
 # ответом на сообщение бота: такие ответы Telegram доставляет и в privacy mode
 WORDS = {'щас': 'now', 'ща': 'now', 'сейчас': 'now', 'now': 'now', 'неделя': 'week', 'week': 'week',
          'месяц': 'month', 'month': 'month', 'поставки': 'supply', 'supply': 'supply'}
-PERIOD_DAYS = {'week': 7, 'month': 30}  # /now_week, /now_month: последние 7 и 30 дней, включая сегодня
+PERIOD_DAYS = {'week': 7, 'month': 30}  # кнопки под /now: последние 7 и 30 дней, включая сегодня
+PERIOD_LABEL = {'now': 'Сегодня', 'week': '7 дней', 'month': '30 дней'}
 WATCH_EVERY = 15 * 60          # как часто проверять склад и паузу в заказах, сек.
 LOW_DAYS, LOW_RESET = 5, 7     # тревога, когда запас < 5 дн; снова следим, когда поднялся до 7+
 GAP_HOURS = 3                  # тревога, если днём 3+ ч нет ни одного заказа
@@ -150,31 +151,63 @@ def build(final_day=None, period='now'):
         return open(p, 'rb').read(), caption(A, bool(final_day))
 
 
-def send_dashboard(final_day=None, quiet=False, period='now'):
-    """True, если картинка дошла. quiet: при ошибке не писать в группу (итог за вчера сам повторит попытку).
-    period: 'now' — сегодня, 'week'/'month' — последние 7/30 дней."""
+def dashboard(final_day=None, period='now', quiet=False):
+    """(png, подпись) или None. Повтор в течение минуты берём из кэша, не дёргая Ozon."""
     with lock:
         c = cache.get(period)
         if not final_day and c and time.time() - c['t'] < COOLDOWN:
-            png, cap = c['png'], c['caption']
-        else:
-            try:
-                png, cap = build(final_day, period)
-            except Exception as e:
-                log.error('build failed: %s', type(e).__name__)
-                if not quiet:
-                    tg('sendMessage', {'chat_id': CHAT_ID, 'text': 'Не получилось забрать данные Ozon, попробуйте через пару минут.'})
-                return False
-            if not final_day:
-                cache[period] = {'t': time.time(), 'png': png, 'caption': cap}
-    r = tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': cap, 'parse_mode': 'HTML'}, files={'photo': ('ozon.png', png)})
+            return c['png'], c['caption']
+        try:
+            png, cap = build(final_day, period)
+        except Exception as e:
+            log.error('build failed: %s', type(e).__name__)
+            if not quiet:
+                tg('sendMessage', {'chat_id': CHAT_ID, 'text': 'Не получилось забрать данные Ozon, попробуйте через пару минут.'})
+            return None
+        if not final_day:
+            cache[period] = {'t': time.time(), 'png': png, 'caption': cap}
+        return png, cap
+
+
+def period_kb(cur):
+    """Кнопки под дашбордом; выбранная — в точках."""
+    return json.dumps({'inline_keyboard': [[{'text': f'• {t} •' if p == cur else t, 'callback_data': f'dash:{p}'}
+                                            for p, t in PERIOD_LABEL.items()]]})
+
+
+def send_dashboard(final_day=None, quiet=False, period='now'):
+    """True, если картинка дошла. quiet: при ошибке не писать в группу (итог за вчера сам повторит попытку).
+    period: 'now' — сегодня, 'week'/'month' — последние 7/30 дней. Под ответом на команду — кнопки периодов,
+    у итога за вчера их нет."""
+    d = dashboard(final_day, period, quiet)
+    if not d:
+        return False
+    data = {'chat_id': CHAT_ID, 'caption': d[1], 'parse_mode': 'HTML'}
+    if not final_day:
+        data['reply_markup'] = period_kb(period)
+    r = tg('sendPhoto', data, files={'photo': ('ozon.png', d[0])})
     if r and not final_day:
         replace_now(r['message_id'])
     return bool(r)
 
 
+def on_period(cq):
+    """Нажали «Сегодня / 7 дней / 30 дней» под дашбордом: меняем картинку в том же сообщении."""
+    period = cq.get('data', '')[5:]
+    msg = cq.get('message') or {}
+    if period not in PERIOD_LABEL or not msg.get('message_id') or (USERS and cq.get('from', {}).get('id') not in USERS):
+        tg('answerCallbackQuery', {'callback_query_id': cq['id']}); return
+    fresh = (cache.get(period) or {}).get('t', 0) > time.time() - COOLDOWN
+    tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': '' if fresh else f'Собираю: {PERIOD_LABEL[period].lower()}…'})
+    d = dashboard(period=period)
+    if d:
+        tg('editMessageMedia', {'chat_id': CHAT_ID, 'message_id': msg['message_id'], 'reply_markup': period_kb(period),
+                                'media': json.dumps({'type': 'photo', 'media': 'attach://photo', 'caption': d[1], 'parse_mode': 'HTML'})},
+           files={'photo': ('ozon.png', d[0])})
+
+
 def replace_now(new_id):
-    """Новый ответ на /now (или /now_week, /now_month) пришёл — прошлые удаляем, в группе остаётся один свежий дашборд.
+    """Новый ответ на /now пришёл — прошлые удаляем, в группе остаётся один свежий дашборд.
     Итог за вчера в 9:00 не трогаем. Свои сообщения бот может удалять только первые 48 часов,
     более старые Telegram не даст удалить — их просто забываем."""
     with slock:
@@ -717,9 +750,12 @@ def is_command(text):
 
 def handle(u):
     cq = u.get('callback_query')
-    if cq:  # кнопки ДА/НЕТ под вопросом про УПД
-        if (cq.get('message') or {}).get('chat', {}).get('id') == CHAT_ID and cq.get('data', '').startswith('upd:'):
+    if cq:  # кнопки ДА/НЕТ под вопросом про УПД и кнопки периодов под дашбордом
+        mine = (cq.get('message') or {}).get('chat', {}).get('id') == CHAT_ID
+        if mine and cq.get('data', '').startswith('upd:'):
             on_upd_answer(cq)
+        elif mine and cq.get('data', '').startswith('dash:'):
+            threading.Thread(target=on_period, args=(cq,), daemon=True).start()
         else:
             tg('answerCallbackQuery', {'callback_query_id': cq['id']})
         return
@@ -774,10 +810,8 @@ def main():
     if mine.get('status') == 'administrator':
         sys.exit('Бот — админ группы и получает всю переписку: снимите админку')
     tg('deleteWebhook', {'drop_pending_updates': False})  # команды, пришедшие между запусками, не теряем
-    # в меню /now, /now_week и /now_month идут подряд: Telegram подсказывает все три, как только набрал /now
-    tg('setMyCommands', {'commands': [{'command': 'now', 'description': 'Дашборд Ozon сейчас'},
-                                      {'command': 'now_week', 'description': 'Дашборд за 7 дней'},
-                                      {'command': 'now_month', 'description': 'Дашборд за 30 дней'},
+    # в меню только две команды; неделя и месяц — кнопками под дашбордом (/now_week, /now_month тоже понимает)
+    tg('setMyCommands', {'commands': [{'command': 'now', 'description': 'Дашборд Ozon: сегодня, 7 или 30 дней'},
                                       {'command': 'supply', 'description': 'Поставки на склады Ozon'}],
                          'scope': {'type': 'chat', 'chat_id': CHAT_ID}})
     if join_warning:  # предупреждаем в саму группу (не в публичный лог), не чаще раза в день
@@ -795,6 +829,8 @@ def main():
         demo_upd_question()
     if 'upd_yes' in demo:
         demo_upd_yes()
+    if 'now' in demo:  # дашборд с кнопками периодов, как на /now
+        send_dashboard()
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=watcher, daemon=True).start()
     log.info('bot started')  # имя бота в лог не пишем: логи Actions публичные
