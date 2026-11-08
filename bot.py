@@ -160,21 +160,28 @@ def next_ask(t):
     return n
 
 
-def upd_question(num, q, demo=False, city=''):
+def supply_ref(num, q, city=''):
+    return f'№{num}' + (f' → {city}' if city else '') + (f' · {q} шт' if q else '')
+
+
+def upd_question(num, q, demo=False, city='', shown=None):
+    """shown — в примере: номер настоящей поставки в пути, которую показываем (ключ кнопок при этом 'demo')."""
     who = ''.join(f' @{x["username"]}' for x in SIGNERS if x.get('username'))
-    tail = '🧪 пример, поставка выдумана' if demo else f'Поставка №{num}' + (f' → {city}' if city else '') + (f' · {q} шт' if q else '')
+    tail = 'Поставка ' + supply_ref(shown or num, q, city)
+    if demo:
+        tail = f'🧪 пример, эта поставка ещё в пути\n{tail}' if shown else '🧪 пример, поставка выдумана'
     return f'УПД подписал?{who}\n{tail}'
 
 
-def ask_upd(num, q, demo=False, city=''):
+def ask_upd(num, q, demo=False, city='', shown=None):
     """Шлёт вопрос с кнопками ДА/НЕТ; у прошлого вопроса по этой поставке кнопки убирает."""
     kb = {'inline_keyboard': [[{'text': 'ДА', 'callback_data': f'upd:{num}:y'}, {'text': 'НЕТ', 'callback_data': f'upd:{num}:n'}]]}
-    r = tg('sendMessage', {'chat_id': CHAT_ID, 'text': upd_question(num, q, demo, city), 'reply_markup': kb})
+    r = tg('sendMessage', {'chat_id': CHAT_ID, 'text': upd_question(num, q, demo, city, shown), 'reply_markup': kb})
     if not r:
         return
     with slock:
         st = load_state(); u = st.setdefault('upd', {}); old = u.get(num)
-        u[num] = {'q': q, 'c': city, 'msg': r['message_id'], 'next': next_ask(msk_now()).isoformat(), 'demo': demo}
+        u[num] = {'q': q, 'c': city, 'n': shown, 'msg': r['message_id'], 'next': next_ask(msk_now()).isoformat(), 'demo': demo}
         save_state(st)
     if old and old.get('msg'):
         tg('editMessageReplyMarkup', {'chat_id': CHAT_ID, 'message_id': old['msg'], 'reply_markup': {'inline_keyboard': []}})
@@ -212,7 +219,7 @@ def on_upd_answer(cq):
             else:
                 e['next'] = next_ask(msk_now()).isoformat()
             st['upd'] = u; save_state(st)
-    base = upd_question(num, e.get('q') if e else None, bool(e and e.get('demo')), (e or {}).get('c') or '')
+    base = upd_question(num, e.get('q') if e else None, bool(e and e.get('demo')), (e or {}).get('c') or '', (e or {}).get('n'))
     if e is None:
         tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'Уже отмечено'})
         tg('editMessageReplyMarkup', {'chat_id': CHAT_ID, 'message_id': msg.get('message_id'), 'reply_markup': {'inline_keyboard': []}})
@@ -222,7 +229,9 @@ def on_upd_answer(cq):
         tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': '✅'})
         tg('editMessageText', {'chat_id': CHAT_ID, 'message_id': msg.get('message_id'), 'text': base + '\n✅ подписан'})
         name = (SIGNER_BY_ID.get(cq.get('from', {}).get('id')) or {}).get('name', '')
-        what = '🧪 пример' if e.get('demo') else f'№{num}' + (f' → {e["c"]}' if e.get('c') else '') + (f' · {e["q"]} шт' if e.get('q') else '')
+        what = supply_ref(e.get('n') or num, e.get('q'), e.get('c') or '')
+        if e.get('demo'):
+            what = f'{what} (🧪 пример)' if e.get('n') else '🧪 пример'
         head = f'#{name.lower().replace(" ", "")}подписал {name} сделал работу WW 🎉🎉🎉' if name else 'УПД подписан WW 🎉🎉🎉'
         tg('sendMessage', {'chat_id': CHAT_ID, 'text': f'{head}\nпо поставке {what}', 'reply_to_message_id': msg.get('message_id')})
     else:
@@ -656,8 +665,15 @@ def main():
             tg('sendMessage', {'chat_id': CHAT_ID, 'text': '⚠️ Бота сейчас можно добавить в любую группу. Закройте это: @BotFather → /setjoingroups → выбрать бота → Disable.'})
     if os.environ.get('DEMO') == 'supply_acceptance':
         send_demo_acceptance()
-    if os.environ.get('DEMO') == 'upd':
-        ask_upd('demo', 0, demo=True)
+    if os.environ.get('DEMO') == 'upd':  # пример на настоящей поставке в пути, если она есть
+        try:
+            s = next((s for s in supplies(done_max=0) if s['state'] != 'COMPLETED'), None)
+        except Exception:
+            s = None
+        if s:
+            ask_upd('demo', qty(s), demo=True, city=s.get('city') or '', shown=s['number'])
+        else:
+            ask_upd('demo', 0, demo=True)
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=watcher, daemon=True).start()
     log.info('bot started')  # имя бота в лог не пишем: логи Actions публичные
