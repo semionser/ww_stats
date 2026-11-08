@@ -2,7 +2,8 @@
 
 Команды в разрешённой группе: /now, /Now, /щас — дашборд, под ним кнопки «Сегодня · 7 дней · 30 дней»
 (та же картинка меняется на месте); /supply, /поставки — поставки на склады Ozon
-(также с @имя_бота). Каждый день в DAILY_TIME (МСК) присылает итог за вчера.
+(также с @имя_бота). Каждый день в DAILY_TIME (МСК) присылает итог за вчера, по понедельникам — итог недели,
+1-го числа — итог месяца. Пишет, когда Ozon отправил выплату, а в 22:00 — если за день был рекорд или веха (records.py).
 После приёмки поставки спрашивает «УПД подписал?» с кнопками ДА/НЕТ и переспрашивает каждые 3 ч днём до «ДА».
 Сам пишет в группу (с 08:00 до 24:00 МСК), когда товар закончился, когда запаса осталось меньше 5 дней,
 когда днём (10:00–22:00) 3+ часа нет заказов, когда цена товара сдвинулась на 10%+ и когда у поставки сменился статус.
@@ -21,7 +22,8 @@ _missing = [k for k in ('TELEGRAM_BOT_TOKEN', 'ALLOWED_CHAT_ID', 'OZON_CLIENT_ID
 if _missing and sys.argv[1:2] != ['test']:
     sys.exit('Не заданы секреты: ' + ', '.join(_missing))
 
-from ozon_data import collect, collect_period, MSK, NAMES, watch, supplies, supply_states, transit_history, prices, SUPPLY_ACTIVE
+import records
+from ozon_data import collect, collect_period, collect_summary, call as ozon_call, MSK, NAMES, watch, supplies, supply_states, transit_history, prices, SUPPLY_ACTIVE
 from widget import widget_html
 from render import to_png
 
@@ -29,6 +31,7 @@ TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHAT_ID = int(os.environ['ALLOWED_CHAT_ID'])
 USERS = {int(x) for x in os.environ.get('ALLOWED_USER_IDS', '').replace(' ', '').split(',') if x}
 DAILY = os.environ.get('DAILY_TIME', '09:00')
+EVENING = (22, 0)  # в это время одним сообщением — рекорды дня и вехи, если были
 STATE = os.environ.get('STATE_FILE', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'state', 'state.json'))
 SERVE_SECONDS = float(os.environ.get('SERVE_SECONDS', 0))  # 0 = без ограничения; в GitHub Actions ~5 ч 50 мин
 COMMANDS = {'/now': 'now', '/щас': 'now', '/now_week': 'week', '/неделя': 'week', '/now_month': 'month', '/месяц': 'month',
@@ -133,22 +136,25 @@ def caption(A, final):
     br = f' ({"/".join(parts)})' if parts else ''
     acc = ('+' if s['accrued'] > 0 else '') + fmt(s['accrued'])
     t = (f'Баланс: <b>{fmt(s["balance"])} ₽</b>\n'
-         f'{"За " + str(pd["n"]) + " дней" if pd else "За день"}: <b>{acc} ₽</b>\n'
+         f'{"За " + pd.get("span", str(pd["n"]) + " дней") if pd else "За день"}: <b>{acc} ₽</b>\n'
          f'Заказы: <b>{s["orders"]}</b>{br} · <b>{fmt(s["orders_sum"])} ₽</b>')
     if final:
         t = f'<b>Итог за {s["updated"][:5]}</b>\n' + t
     if pd:
         dm = lambda d: d[8:] + '.' + d[5:7]
-        t = f'<b>{pd["n"]} дней · {dm(pd["from"])}–{dm(pd["to"])}</b>\n' + t
+        t = f'<b>{pd.get("title", str(pd["n"]) + " дней")} · {dm(pd["from"])}–{dm(pd["to"])}</b>\n' + t
     return t
 
 
-def build(final_day=None, period='now'):
-    A = collect_period(PERIOD_DAYS[period]) if period in PERIOD_DAYS else collect(final_day)
+def render(A, final=False):
     with tempfile.TemporaryDirectory() as d:
         p = os.path.join(d, 'ozon.png')
-        to_png(widget_html(A, FINAL=bool(final_day), wide=True), p, wide=True)
-        return open(p, 'rb').read(), caption(A, bool(final_day))
+        to_png(widget_html(A, FINAL=final, wide=True), p, wide=True)
+        return open(p, 'rb').read(), caption(A, final)
+
+
+def build(final_day=None, period='now'):
+    return render(collect_period(PERIOD_DAYS[period]) if period in PERIOD_DAYS else collect(final_day), bool(final_day))
 
 
 def dashboard(final_day=None, period='now', quiet=False):
@@ -175,14 +181,14 @@ def period_kb(cur):
                                             for p, t in PERIOD_LABEL.items()]]})
 
 
-def send_dashboard(final_day=None, quiet=False, period='now'):
+def send_dashboard(final_day=None, quiet=False, period='now', extra=()):
     """True, если картинка дошла. quiet: при ошибке не писать в группу (итог за вчера сам повторит попытку).
     period: 'now' — сегодня, 'week'/'month' — последние 7/30 дней. Под ответом на команду — кнопки периодов,
-    у итога за вчера их нет."""
+    у итога за вчера их нет. extra — строки в конец подписи (рекорды)."""
     d = dashboard(final_day, period, quiet)
     if not d:
         return False
-    data = {'chat_id': CHAT_ID, 'caption': d[1], 'parse_mode': 'HTML'}
+    data = {'chat_id': CHAT_ID, 'caption': d[1] + ('\n\n' + '\n'.join(extra) if extra else ''), 'parse_mode': 'HTML'}
     if not final_day:
         data['reply_markup'] = period_kb(period)
     r = tg('sendPhoto', data, files={'photo': ('ozon.png', d[0])})
@@ -373,30 +379,181 @@ def on_upd_answer(cq):
         tg('editMessageText', {'chat_id': CHAT_ID, 'message_id': msg.get('message_id'), 'text': base + f'\n❌ пока нет · напомню {when}'})
 
 
+# ---------- итоги по расписанию ----------
+# по порядку: итог недели — после итога за вчера, итог месяца — после итога недели
+JOBS = [('daily', lambda d: True, 'Итог за вчера'),
+        ('weekly', lambda d: d.weekday() == 0, 'Итог недели'),
+        ('monthly', lambda d: d.day == 1, 'Итог месяца')]
+
+
+def send_summary(kind, today, demo=False):
+    """Итог прошлой недели (kind='week') или прошлого месяца ('month') картинкой, как дашборд, без кнопок."""
+    with lock:
+        try:
+            A = collect_summary(kind, today)
+            png, cap = render(A)
+        except Exception as e:
+            log.error('summary failed: %s', type(e).__name__)
+            return False
+    pd = A['period']
+    try:
+        records.ensure_loaded()
+        lines = records.period_lines(kind, datetime.date.fromisoformat(pd['from']), datetime.date.fromisoformat(pd['to']))
+    except Exception as e:
+        lines = []; log.error('records: %s', type(e).__name__)
+    if lines:
+        cap += '\n\n' + '\n'.join(lines)
+    if demo:
+        cap = '🧪 <i>Пример: так итог придёт сам</i>\n' + cap
+    return bool(tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': cap, 'parse_mode': 'HTML'}, files={'photo': ('ozon.png', png)}))
+
+
+def run_job(key, today):
+    if key == 'daily':
+        y = today - datetime.timedelta(1)
+        try:
+            records.ensure_loaded(); extra = records.daily_lines(y)
+        except Exception as e:
+            extra = []; log.error('records: %s', type(e).__name__)
+        return send_dashboard(final_day=y, quiet=True, extra=extra)
+    return send_summary('week' if key == 'weekly' else 'month', today)
+
+
 def scheduler():
     hh, mm = map(int, DAILY.split(':'))
-    tries = {'day': None, 'n': 0, 't': 0.0}  # попытки итога за вчера в этом запуске
+    tries = {}  # попытки итогов в этом запуске: ключ → {'day', 'n', 't'}
     while True:
       try:
         now = msk_now(); today = str(now.date())
-        with slock:
-            sent = load_state().get('daily') == today
-        if tries['day'] != today:
-            tries.update(day=today, n=0, t=0.0)
-        if not sent and (now.hour, now.minute) >= (hh, mm) and time.time() - tries['t'] >= DAILY_RETRY:
-            tries['n'] += 1; tries['t'] = time.time()
-            last = tries['n'] >= DAILY_TRIES
-            log.info('daily report, try %s', tries['n'])
-            ok = send_dashboard(final_day=now.date() - datetime.timedelta(1), quiet=True)
-            if ok or last:
+        if (now.hour, now.minute) >= (hh, mm):
+            for key, due, name in JOBS:
+                if not due(now.date()):
+                    continue
                 with slock:
-                    st = load_state(); st['daily'] = today; save_state(st)
-            if not ok and last:
-                tg('sendMessage', {'chat_id': CHAT_ID, 'text': '⚠️ Итог за вчера не собрался: Ozon не отвечал целый час.'})
+                    if load_state().get(key) == today:
+                        continue
+                tr = tries.get(key)
+                if not tr or tr['day'] != today:
+                    tr = tries[key] = {'day': today, 'n': 0, 't': 0.0}
+                if time.time() - tr['t'] >= DAILY_RETRY:
+                    tr['n'] += 1; tr['t'] = time.time()
+                    last = tr['n'] >= DAILY_TRIES
+                    log.info('%s report, try %s', key, tr['n'])
+                    ok = run_job(key, now.date())
+                    if ok or last:
+                        with slock:
+                            st = load_state(); st[key] = today; save_state(st)
+                    if not ok and last:
+                        tg('sendMessage', {'chat_id': CHAT_ID, 'text': f'⚠️ {name} не собрался: Ozon не отвечал целый час.'})
+                break  # следующий итог — только когда этот отправлен
+        if (now.hour, now.minute) >= EVENING:
+            evening(today, tries)
         check_upd()
       except Exception as e:
         log.error('scheduler: %s', type(e).__name__)
       time.sleep(30)
+
+
+# ---------- выплаты, рекорды ----------
+def seen(key):
+    """True, если об этом уже писали; иначе запоминаем (в state — только хэш)."""
+    h = records.mark(key)
+    with slock:
+        st = load_state(); ms = st.get('marks') or []
+        if h in ms:
+            return True
+        st['marks'] = (ms + [h])[-300:]; save_state(st)
+    return False
+
+
+_paycheck = {'t': 0.0}
+
+
+def check_payouts():
+    """Ozon перевёл деньги на счёт: в балансе за день появляются «выплаты» (отрицательное число).
+    Смотрим раз в час вчера и сегодня, чтобы ночная выплата пришла утром."""
+    now = msk_now()
+    if now.hour < QUIET_UNTIL or time.time() - _paycheck['t'] < 3600:
+        return
+    _paycheck['t'] = time.time()
+    found = []
+    for d in (now.date() - datetime.timedelta(1), now.date()):
+        b = ozon_call('/v1/finance/balance', {"date_from": str(d), "date_to": str(d)})
+        pays = b['total'].get('payments') or []
+        pays = [pays] if isinstance(pays, dict) else pays
+        paid = round(-sum(float(p.get('value') or 0) for p in pays))
+        if paid > 0:
+            found.append((d, paid))
+    for d, paid in found:
+        if not seen(f'pay:{d}:{paid}'):
+            tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML', 'text': payout_text(paid, d if d != now.date() else None)})
+
+
+def payout_text(paid, day=None):
+    return f'💸 Ozon отправил выплату <b>{fmt(paid)} ₽</b>' + (f' ({day:%d.%m})' if day else '')
+
+
+def evening(today, tries):
+    """Раз в день в 22:00: рекорды дня и вехи одним сообщением. Ничего не было — молчим.
+    Ozon не ответил — ещё 2 попытки раз в 10 минут, потом до завтра."""
+    with slock:
+        if load_state().get('evening') == today:
+            return
+    tr = tries.get('evening')
+    if not tr or tr['day'] != today:
+        tr = tries['evening'] = {'day': today, 'n': 0, 't': 0.0}
+    if time.time() - tr['t'] < DAILY_RETRY:
+        return
+    tr['n'] += 1; tr['t'] = time.time()
+    try:
+        records.ensure_loaded()
+        lines = [text for key, text in records.live() if not seen(key)]
+        if lines:
+            tg('sendMessage', {'chat_id': CHAT_ID, 'text': '\n'.join(lines), 'parse_mode': 'HTML'})
+        done = True
+    except Exception as e:
+        log.error('evening: %s', type(e).__name__); done = tr['n'] >= 3
+    if done:
+        with slock:
+            st = load_state(); st['evening'] = today; save_state(st)
+
+
+def demo_records():
+    """Как будут выглядеть сообщения о рекордах: на настоящих данных, где они есть."""
+    records.ensure_loaded()
+    S = records.status(); today = msk_now().date()
+    (ro, rod), (rs, rsd) = S['orders'], S['sum']
+    y = today - datetime.timedelta(1)
+    ex_day = next((y - datetime.timedelta(i) for i in range(60) if records.daily_lines(y - datetime.timedelta(i))), None)  # последний день со строками
+    mon = today - datetime.timedelta(today.weekday() + 7)  # прошлая полная неделя
+    nxt = lambda v, step: int(v // step + 1) * step
+    lines = ['🧪 <b>Так будут выглядеть рекорды</b>', '',
+             '<i>В 22:00, если за день побит рекорд за всё время или пройдена веха (иначе бот молчит):</i>',
+             f'🏆 <b>Рекорд дня по сумме!</b> Уже {fmt(rs + 1300)} ₽ заказов. Прошлый рекорд {fmt(rs)} ₽, {records.ddate(rsd)}',
+             f'🎉 <b>{fmt(nxt(S["total_sum"], records.STEP_SUM) // 1_000_000)} млн ₽</b> заказов за всё время! Первый заказ был {records.ddate(S["first"])}',
+             f'🎉 <b>{fmt(nxt(S["total_orders"], records.STEP_ORDERS))}-й заказ</b> за всё время! Первый был {records.ddate(S["first"])}', '']
+    if ex_day:
+        lines += [f'<i>Строки в итоге за вчера (настоящие, за {ex_day:%d.%m}):</i>'] + records.daily_lines(ex_day) + ['']
+    lines += [f'<i>Строки в итоге недели (настоящие, за {mon:%d.%m}–{mon + datetime.timedelta(6):%d.%m}):</i>']
+    lines += records.period_lines('week', mon, mon + datetime.timedelta(6)) or ['ничего особенного, строк нет']
+    lines += ['', '<i>Вехи: каждые 1000 заказов и каждый миллион ₽ за всё время, каждые 500 000 ₽ заказов за месяц. '
+              'Выше — ближайшие две.</i>']
+    send_text('\n'.join(lines))
+
+
+def demo_payout():
+    """Пример сообщения о выплате — по последней настоящей выплате за 60 дней."""
+    today = msk_now().date()
+    for i in range(60):
+        d = today - datetime.timedelta(i)
+        b = ozon_call('/v1/finance/balance', {"date_from": str(d), "date_to": str(d)})
+        pays = b['total'].get('payments') or []
+        pays = [pays] if isinstance(pays, dict) else pays
+        paid = round(-sum(float(p.get('value') or 0) for p in pays))
+        if paid > 0:
+            tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML',
+                               'text': f'🧪 <i>Пример, это выплата от {d:%d.%m}</i>\n' + payout_text(paid)})
+            return
 
 
 # ---------- поставки ----------
@@ -729,6 +886,11 @@ def watcher():
             check_supplies()
         except Exception as e:
             ok = False; log.error('supplies watch: %s', type(e).__name__)
+        for f in (check_payouts,):  # не влияет на «Ozon не отвечает»: у выплат свой запрос
+            try:
+                f()
+            except Exception as e:
+                log.error('%s: %s', f.__name__, type(e).__name__)
         try:
             ozon_health(ok)
         except Exception as e:
@@ -831,6 +993,14 @@ def main():
         demo_upd_yes()
     if 'now' in demo:  # дашборд с кнопками периодов, как на /now
         send_dashboard()
+    if 'summaries' in demo:  # итог прошлой полной недели и прошлого месяца, как придут сами
+        today = msk_now().date()
+        send_summary('week', today - datetime.timedelta(today.weekday()), demo=True)
+        send_summary('month', today.replace(day=1), demo=True)
+    if 'records' in demo:
+        demo_records()
+    if 'payout' in demo:
+        demo_payout()
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=watcher, daemon=True).start()
     log.info('bot started')  # имя бота в лог не пишем: логи Actions публичные
