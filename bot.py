@@ -4,6 +4,7 @@
 (та же картинка меняется на месте); /supply, /поставки — поставки на склады Ozon
 (также с @имя_бота). Каждый день в DAILY_TIME (МСК) присылает итог за вчера, по понедельникам — итог недели,
 1-го числа — итог месяца. Пишет, когда Ozon отправил выплату, а в 22:00 — если за день был рекорд или веха (records.py).
+В подписях к дашбордам рекордов нет, только отдельными сообщениями.
 После приёмки поставки спрашивает «УПД подписал?» с кнопками ДА/НЕТ и переспрашивает каждые 3 ч днём до «ДА».
 Сам пишет в группу (с 08:00 до 24:00 МСК), когда товар закончился, когда запаса осталось меньше 5 дней,
 когда днём (10:00–22:00) 3+ часа нет заказов, когда цена товара сдвинулась на 10%+ и когда у поставки сменился статус.
@@ -181,14 +182,14 @@ def period_kb(cur):
                                             for p, t in PERIOD_LABEL.items()]]})
 
 
-def send_dashboard(final_day=None, quiet=False, period='now', extra=()):
+def send_dashboard(final_day=None, quiet=False, period='now'):
     """True, если картинка дошла. quiet: при ошибке не писать в группу (итог за вчера сам повторит попытку).
     period: 'now' — сегодня, 'week'/'month' — последние 7/30 дней. Под ответом на команду — кнопки периодов,
-    у итога за вчера их нет. extra — строки в конец подписи (рекорды)."""
+    у итога за вчера их нет."""
     d = dashboard(final_day, period, quiet)
     if not d:
         return False
-    data = {'chat_id': CHAT_ID, 'caption': d[1] + ('\n\n' + '\n'.join(extra) if extra else ''), 'parse_mode': 'HTML'}
+    data = {'chat_id': CHAT_ID, 'caption': d[1], 'parse_mode': 'HTML'}
     if not final_day:
         data['reply_markup'] = period_kb(period)
     r = tg('sendPhoto', data, files={'photo': ('ozon.png', d[0])})
@@ -418,7 +419,8 @@ JOBS = [('daily', lambda d: True, 'Итог за вчера'),
 
 
 def send_summary(kind, today, demo=False):
-    """Итог прошлой недели (kind='week') или прошлого месяца ('month') картинкой, как дашборд, без кнопок."""
+    """Итог прошлой недели (kind='week') или прошлого месяца ('month') картинкой, как дашборд, без кнопок.
+    Если неделя (месяц) лучшая за всё время или давно не было такой — следом отдельное сообщение: в подписи рекордов нет."""
     with lock:
         try:
             A = collect_summary(kind, today)
@@ -432,21 +434,17 @@ def send_summary(kind, today, demo=False):
         lines = records.period_lines(kind, datetime.date.fromisoformat(pd['from']), datetime.date.fromisoformat(pd['to']))
     except Exception as e:
         lines = []; log.error('records: %s', type(e).__name__)
-    if lines:
-        cap += '\n\n' + '\n'.join(lines)
     if demo:
         cap = '🧪 <i>Пример: так итог придёт сам</i>\n' + cap
-    return bool(tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': cap, 'parse_mode': 'HTML'}, files={'photo': ('ozon.png', png)}))
+    ok = bool(tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': cap, 'parse_mode': 'HTML'}, files={'photo': ('ozon.png', png)}))
+    if ok and lines:
+        tg('sendMessage', {'chat_id': CHAT_ID, 'text': '\n'.join(lines), 'parse_mode': 'HTML'})
+    return ok
 
 
 def run_job(key, today):
     if key == 'daily':
-        y = today - datetime.timedelta(1)
-        try:
-            records.ensure_loaded(); extra = records.daily_lines(y)
-        except Exception as e:
-            extra = []; log.error('records: %s', type(e).__name__)
-        return send_dashboard(final_day=y, quiet=True, extra=extra)
+        return send_dashboard(final_day=today - datetime.timedelta(1), quiet=True)
     return send_summary('week' if key == 'weekly' else 'month', today)
 
 
@@ -555,20 +553,24 @@ def demo_records():
     S = records.status(); today = msk_now().date()
     (ro, rod), (rs, rsd) = S['orders'], S['sum']
     y = today - datetime.timedelta(1)
-    ex_day = next((y - datetime.timedelta(i) for i in range(60) if records.daily_lines(y - datetime.timedelta(i))), None)  # последний день со строками
+    ex = next(((y - datetime.timedelta(i), L) for i in range(60)
+               for L in [[t for _, t in records.day_lines(y - datetime.timedelta(i), *records.history_day(y - datetime.timedelta(i)))]] if L),
+              (None, []))  # последний день, когда было бы что написать
     mon = today - datetime.timedelta(today.weekday() + 7)  # прошлая полная неделя
     nxt = lambda v, step: int(v // step + 1) * step
     lines = ['🧪 <b>Так будут выглядеть рекорды</b>', '',
-             '<i>В 22:00, если за день побит рекорд за всё время или пройдена веха (иначе бот молчит):</i>',
-             f'🏆 <b>Рекорд дня по сумме!</b> Уже {fmt(rs + 1300)} ₽ заказов. Прошлый рекорд {fmt(rs)} ₽, {records.ddate(rsd)}',
-             f'🎉 <b>{fmt(nxt(S["total_sum"], records.STEP_SUM) // 1_000_000)} млн ₽</b> заказов за всё время! Первый заказ был {records.ddate(S["first"])}',
-             f'🎉 <b>{fmt(nxt(S["total_orders"], records.STEP_ORDERS))}-й заказ</b> за всё время! Первый был {records.ddate(S["first"])}', '']
-    if ex_day:
-        lines += [f'<i>Строки в итоге за вчера (настоящие, за {ex_day:%d.%m}):</i>'] + records.daily_lines(ex_day) + ['']
-    lines += [f'<i>Строки в итоге недели (настоящие, за {mon:%d.%m}–{mon + datetime.timedelta(6):%d.%m}):</i>']
+             '<i>В 22:00 одним сообщением, только если за день было что-то особенное (иначе бот молчит). '
+             'В подписях к дашбордам рекордов нет.</i>',
+             '', '<i>Рекорд дня за всё время:</i>',
+             f'🏆 <b>Рекорд дня по сумме!</b> Уже {fmt(rs + 1300)} ₽ заказов. Прошлый рекорд {fmt(rs)} ₽, {records.ddate(rsd)}']
+    if ex[0]:
+        lines += ['', f'<i>Лучший день за долгое время и рекорды товаров (настоящие, за {ex[0]:%d.%m}):</i>'] + ex[1]
+    lines += ['', '<i>Вехи (эти — ближайшие):</i>',
+              f'🎉 <b>{fmt(nxt(S["total_sum"], records.STEP_SUM) // 1_000_000)} млн ₽</b> заказов за всё время! Первый заказ был {records.ddate(S["first"])}',
+              f'🎉 <b>{fmt(nxt(S["total_orders"], records.STEP_ORDERS))}-й заказ</b> за всё время! Первый был {records.ddate(S["first"])}',
+              '', f'<i>Отдельным сообщением после итога недели или месяца (настоящее, за неделю {mon:%d.%m}–{mon + datetime.timedelta(6):%d.%m}):</i>']
     lines += records.period_lines('week', mon, mon + datetime.timedelta(6)) or ['ничего особенного, строк нет']
-    lines += ['', '<i>Вехи: каждые 1000 заказов и каждый миллион ₽ за всё время, каждые 500 000 ₽ заказов за месяц. '
-              'Выше — ближайшие две.</i>']
+    lines += ['', '<i>Вехи: каждые 1000 заказов и каждый миллион ₽ за всё время, каждые 500 000 ₽ заказов за месяц.</i>']
     send_text('\n'.join(lines))
 
 

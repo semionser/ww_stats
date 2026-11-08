@@ -5,12 +5,12 @@
 В state бот хранит только отметки «об этом уже написали» — хэши, по которым ничего не восстановить.
 
 Что считается:
-- рекорд дня за всё время (заказы, сумма) — в 22:00 одним сообщением вместе с вехами;
-- «столько не было с …» для вчерашнего дня, если день лучший хотя бы за 30 дней — строкой в итоге за вчера;
-- личный рекорд товара (от 5 шт за день) — строкой в итоге за вчера;
-- лучшая неделя / месяц — строкой в автоитогах;
+В подписи к дашбордам рекорды не пишутся, только отдельными сообщениями:
+- в 22:00 одним сообщением: рекорд дня за всё время (заказы, сумма), «столько не было с …» (если день лучший
+  хотя бы за 30 дней), личный рекорд товара (от 5 шт за день), вехи;
+- лучшая неделя / месяц — отдельным сообщением сразу после автоитога;
 - вехи: каждые 1000 заказов и каждый миллион ₽ за всё время, каждые 500 000 ₽ заказов за месяц.
-История грузится, только когда нужна (итог в 9:00, вечерняя проверка в 22:00), а не при каждом запуске.
+История грузится, только когда нужна (22:00 и автоитоги по понедельникам и 1-го числа), а не при каждом запуске.
 """
 import collections, datetime, hashlib, html, os, threading
 
@@ -101,30 +101,32 @@ def _top(series, before):
     return max(items) if items else (0, None)
 
 
-# ---------- строки в итог за вчера ----------
-def daily_lines(d):
-    if not H['ready'] or d not in H['day']:
-        return []
+# ---------- «столько не было с …» и личные рекорды товаров за день ----------
+def day_lines(d, o, s, prodq):
+    """(отметка, текст) для дня d с o заказами на s ₽ и штуками по товарам prodq — против истории до d.
+    Рекорд за всё время здесь не пишем: это отдельное сообщение «Рекорд дня!» в live()."""
     with hl:
-        o, s = H['day'][d]
-        so = {k: v[0] for k, v in H['day'].items()}; ss = {k: v[1] for k, v in H['day'].items()}
-        prods = [(k, c[d], max([q for x, q in c.items() if x < d] or [0]), min(c))
-                 for k, c in H['prod'].items() if c.get(d, 0) >= PROD_MIN and k in NAMES]
+        so = {k: v[0] for k, v in H['day'].items() if k < d}; ss = {k: v[1] for k, v in H['day'].items() if k < d}
+        prods = [(k, q, max([x for y, x in H['prod'].get(k, {}).items() if y < d] or [0]),
+                  min([y for y in H['prod'].get(k, {}) if y < d] or [d]))
+                 for k, q in prodq.items() if q >= PROD_MIN and k in NAMES]
     out = []
-    for v, ser, what in ((o, so, 'orders'), (s, ss, 'sum')):
-        if not v:
-            continue
-        since = _since(ser, d, v)
-        if since is None:
-            out.append(f'🏆 Рекорд за всё время: {orders_word(o)} за день' if what == 'orders'
-                       else f'🏆 Рекорд за всё время: {fmt(s)} ₽ заказов за день')
-        elif (d - since).days >= DAY_GAP:
-            out.append(f'🔥 {orders_word(o)} за день: столько не было с {ddate(since)}' if what == 'orders'
-                       else f'🔥 {fmt(s)} ₽ заказов за день: такого не было с {ddate(since)}')
+    for v, ser, what in ((o, so, 'o'), (s, ss, 's')):
+        since = _since(ser, d, v) if v else None
+        if since and (d - since).days >= DAY_GAP:
+            out.append((f'B:{what}:{d}', f'🔥 {orders_word(o)} за день: столько не было с {ddate(since)}' if what == 'o'
+                        else f'🔥 {fmt(s)} ₽ заказов за день: такого не было с {ddate(since)}'))
     # у нового товара первые дни — всегда «рекорд», поэтому только для тех, что продаются 2+ недели
     best = sorted([(q, k) for k, q, was, first in prods if q > was and (d - first).days >= 14], reverse=True)[:3]
-    out += [f'⭐ {html.escape(NAMES.get(k, k))}: {q} шт за день, личный рекорд' for q, k in best]  # строки уходят с parse_mode=HTML
+    out += [(f'E:{d}:{k}', f'⭐ {html.escape(NAMES.get(k, k))}: {q} шт за день, личный рекорд') for q, k in best]  # уходит с parse_mode=HTML
     return out
+
+
+def history_day(d):
+    """o, s, штуки по товарам за прошедший день из истории — для примера."""
+    with hl:
+        o, s = H['day'].get(d, (0, 0.0))
+        return o, s, {k: c[d] for k, c in H['prod'].items() if d in c}
 
 
 # ---------- строки в итоги недели и месяца ----------
@@ -159,8 +161,9 @@ def period_lines(kind, start, end):
 # ---------- проверка в течение дня ----------
 def today_totals():
     now = _now()
-    day, _ = _agg(_posts(datetime.datetime.combine(now.date(), datetime.time()), now))
-    return day.get(now.date(), [0, 0.0])
+    day, prod = _agg(_posts(datetime.datetime.combine(now.date(), datetime.time()), now))
+    o, s = day.get(now.date(), [0, 0.0])
+    return o, s, {k: c[now.date()] for k, c in prod.items() if now.date() in c}
 
 
 def ensure_loaded():
@@ -171,11 +174,12 @@ def ensure_loaded():
 
 
 def live(now=None, cur=None):
-    """Список (отметка, текст): рекорд дня за всё время и вехи, пройденные сегодня. Отметки — чтобы не писать дважды."""
+    """Список (отметка, текст) для сообщения в 22:00: рекорд дня за всё время, «столько не было с …»,
+    личные рекорды товаров, вехи, пройденные сегодня. Отметки — чтобы не писать дважды."""
     if not H['ready']:
         return []
     now = now or _now(); today = now.date()
-    o, s = cur if cur is not None else today_totals()
+    o, s, prodq = cur if cur is not None else today_totals()
     with hl:
         so = {k: v[0] for k, v in H['day'].items() if k < today}; ss = {k: v[1] for k, v in H['day'].items() if k < today}
         month = sum(v[1] for k, v in H['day'].items() if k < today and k.year == today.year and k.month == today.month)
@@ -185,6 +189,7 @@ def live(now=None, cur=None):
         out.append((f'A:o:{today}', f'🏆 <b>Рекорд дня!</b> Уже {orders_word(o)}, столько за день ещё не было. Прошлый рекорд {fmt(ro)}, {ddate(rod)}'))
     if rs and s > rs:
         out.append((f'A:s:{today}', f'🏆 <b>Рекорд дня по сумме!</b> Уже {fmt(s)} ₽ заказов. Прошлый рекорд {fmt(rs)} ₽, {ddate(rsd)}'))
+    out += day_lines(today, o, s, prodq)
     # вехи: только если перешли границу сегодня
     first = min(so) if so else today
     for before, after, step, key, text in (
