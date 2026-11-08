@@ -318,8 +318,6 @@ SUPPLY_ICON = {'DATA_FILLING': '📝', 'READY_TO_SUPPLY': '📦', 'ACCEPTED_AT_S
                'ACCEPTANCE_AT_STORAGE_WAREHOUSE': '🔍', 'REPORTS_CONFIRMATION_AWAITING': '📄', 'COMPLETED': '✅',
                'REPORT_REJECTED': '⚠️', 'REJECTED_AT_SUPPLY_WAREHOUSE': '⛔', 'CANCELLED': '❌', 'OVERDUE': '⌛'}
 SUPPLY_FAIL_AT = {'REJECTED_AT_SUPPLY_WAREHOUSE': 3, 'REPORT_REJECTED': 6}  # на каком этапе застряла
-ABBR = {'МО', 'РФЦ', 'МРФЦ', 'СЦ', 'КГТ', 'ППЗ', 'АППЗ', 'ХАБ'}
-wh = lambda s: ' '.join(w if w in ABBR or w.isdigit() else (w.lower() if len(w) <= 2 else w.capitalize()) for w in s.replace('_', ' ').split())
 dm = lambda t: t.strftime('%d.%m %H:%M') if t else '—'
 ru = lambda st: SUPPLY_RU.get(st, html.escape(str(st)))
 qty = lambda s: sum(q for _, q, _ in s['items'])
@@ -345,16 +343,14 @@ def coming_of(S):
     return c
 
 
-def supply_block(num, st, line=None, changed=False, prev=None, city=''):
-    """Карточка поставки. city — куда едет. changed: отметить 🔔, жирный статус и «было: …»."""
+def supply_block(num, st, q=None, changed=False, prev=None, city=''):
+    """Карточка поставки, каждая строка короткая, чтобы на телефоне ничего не переносилось:
+    №5642 → город / шкала и штуки / статус / («было: …»). changed: отметить 🔔 и выделить статус."""
     e = html.escape
-    B = [f'{SUPPLY_ICON.get(st, "📦")} <b>№{e(sn(num))}' + (f' → {e(city)}' if city else '') + '</b>' + (' 🔔' if changed else ''),
-         f'{bar(st)} ' + (f'<b>{ru(st)}</b>' if changed else ru(st))]
-    if changed:
-        B.append('<i>новая поставка</i>' if prev is None else f'<i>было: {ru(prev)}</i>')
-    if line:
-        B.append(line)
-    return B
+    return ([f'{SUPPLY_ICON.get(st, "📦")} <b>№{e(sn(num))}' + (f' → {e(city)}' if city else '') + '</b>' + (' 🔔' if changed else ''),
+             bar(st) + (f' <b>{q} шт</b>' if q else ''),
+             f'<b>{ru(st)}</b>' if changed else ru(st)]
+            + (['<i>новая поставка</i>' if prev is None else f'<i>было: {ru(prev)}</i>'] if changed else []))
 
 
 BEFORE_DROP = ('DATA_FILLING', 'READY_TO_SUPPLY')
@@ -408,7 +404,7 @@ def timing(s, now, tdays):
         if eta:
             t += f' · приедет {when(eta)}' if eta >= now.date() else f' · опаздывает, план был {when(eta)}'
         if 0 < s.get('boxes_arrived', 0) < s.get('boxes', 0):
-            t += f' · приехало {s["boxes_arrived"]} из {s["boxes"]} коробок'
+            t += f'\nприехало {s["boxes_arrived"]} из {s["boxes"]} коробок'
         return t
     if s['state'] == 'ACCEPTANCE_AT_STORAGE_WAREHOUSE' and s['updated']:
         return f'на складе с {dm(s["updated"])}'
@@ -420,28 +416,20 @@ def supplies_text(S, changed=None, gone=()):
     e = html.escape; changed = changed or {}
     act = [s for s in S if s['state'] != 'COMPLETED']
     L = []
-    to = lambda c: f' → {e(c)}' if c else ''
-    for g in gone:
-        L += [f'🔔 <b>Поставка №{e(sn(g["number"]))}{to(g.get("city"))}: {ru(g["state"])}</b>']
+    for g in gone:  # первая строка — то, что видно в уведомлении
+        L += [f'🔔 <b>№{e(sn(g["number"]))}: {ru(g["state"])}</b>']
     for s in act:
         if s['id'] in changed:
-            L += [f'🔔 <b>Поставка №{e(sn(s["number"]))}{to(s.get("city"))}: {ru(s["state"])}</b>']
+            L += [f'🔔 <b>№{e(sn(s["number"]))}: {ru(s["state"])}</b>']
     for g in gone:
-        B = supply_block(g['number'], g['state'], None, True, g['prev'], g.get('city'))
-        B[-1] += f' · <b>{g["qty"]} шт</b>'
-        L += [''] + B
+        L += [''] + supply_block(g['number'], g['state'], g['qty'], True, g['prev'], g.get('city'))
     if L:
         L.append('')
     L.append(f'🚚 <b>Поставки в работе: {len(act)}</b>' if act else '🚚 <b>Поставок в работе нет</b>')
     now = msk_now()
     tdays = transit_days() if any(s.get('crossdock') and not s.get('eta') and s['state'] in BEFORE_DROP + ON_THE_WAY for s in act) else 0
     for s in act:
-        stor = ', '.join(map(wh, s['storage']))
-        if s.get('crossdock'):  # сдаём в точку отгрузки, оттуда Ozon везёт на склад в другом городе
-            where = 'через ' + wh(s['dropoff']) + (f' · склад {stor}' if stor else '')
-        else:
-            where = 'склад ' + (stor or wh(s['dropoff']))
-        B = supply_block(s['number'], s['state'], f'{e(where)} · <b>{qty(s)} шт</b>', s['id'] in changed, changed.get(s['id']), s.get('city'))
+        B = supply_block(s['number'], s['state'], qty(s), s['id'] in changed, changed.get(s['id']), s.get('city'))
         t = timing(s, now, tdays)
         L += [''] + B + ([t] if t else [])
     return '\n'.join(L)
