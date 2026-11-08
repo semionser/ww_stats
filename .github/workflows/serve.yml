@@ -10,7 +10,7 @@ on:
       demo:
         description: "Разово прислать пример сообщения в группу"
         type: choice
-        options: [none, supply_acceptance, upd]
+        options: [none, supply_acceptance, upd, upd_yes]
         default: none
   push:
     branches: [main]

@@ -199,6 +199,46 @@ def check_upd():
         ask_upd(n, e.get('q'), city=e.get('c') or '')
 
 
+def upd_signed(num, e, msg_id, name):
+    """ДА: вопрос помечаем «✅ подписан», в группу — поздравление ответом на вопрос."""
+    base = upd_question(num, e.get('q'), bool(e.get('demo')), e.get('c') or '', e.get('n'))
+    tg('editMessageText', {'chat_id': CHAT_ID, 'message_id': msg_id, 'text': base + '\n✅ подписан'})
+    what = supply_ref(e.get('n') or num, e.get('q'), e.get('c') or '')
+    if e.get('demo'):
+        what = f'{what} (🧪 пример)' if e.get('n') else '🧪 пример'
+    head = f'#{name.lower().replace(" ", "")}подписал {name} сделал работу WW 🎉🎉🎉' if name else 'УПД подписан WW 🎉🎉🎉'
+    tg('sendMessage', {'chat_id': CHAT_ID, 'text': f'{head}\nпо поставке {what}', 'reply_to_message_id': msg_id})
+
+
+def demo_upd_question():
+    """Пример вопроса про УПД на настоящей поставке в пути, если она есть."""
+    try:
+        s = next((s for s in supplies(done_max=0) if s['state'] != 'COMPLETED'), None)
+    except Exception:
+        s = None
+    if s:
+        ask_upd('demo', qty(s), demo=True, city=s.get('city') or '', shown=s['number'])
+    else:
+        ask_upd('demo', 0, demo=True)
+
+
+def demo_upd_yes():
+    """Пример по ручному запуску: как будто подписант нажал ДА под последним примером вопроса.
+    Если примера в состоянии нет — сначала задаёт его."""
+    with slock:
+        e = (load_state().get('upd') or {}).get('demo')
+    if not e:
+        demo_upd_question()
+        with slock:
+            e = (load_state().get('upd') or {}).get('demo')
+    if not e:
+        return
+    with slock:
+        st = load_state(); (st.get('upd') or {}).pop('demo', None); save_state(st)
+    log.info('demo upd yes')
+    upd_signed('demo', e, e['msg'], (SIGNERS[0] if SIGNERS else {}).get('name', ''))
+
+
 def on_upd_answer(cq):
     """Нажали ДА/НЕТ. Отвечать могут только подписанты (если UPD_SIGNER не задан — люди из ALLOWED_USER_IDS)."""
     msg = cq.get('message') or {}
@@ -227,13 +267,7 @@ def on_upd_answer(cq):
     log.info('upd answer')
     if ans == 'y':
         tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': '✅'})
-        tg('editMessageText', {'chat_id': CHAT_ID, 'message_id': msg.get('message_id'), 'text': base + '\n✅ подписан'})
-        name = (SIGNER_BY_ID.get(cq.get('from', {}).get('id')) or {}).get('name', '')
-        what = supply_ref(e.get('n') or num, e.get('q'), e.get('c') or '')
-        if e.get('demo'):
-            what = f'{what} (🧪 пример)' if e.get('n') else '🧪 пример'
-        head = f'#{name.lower().replace(" ", "")}подписал {name} сделал работу WW 🎉🎉🎉' if name else 'УПД подписан WW 🎉🎉🎉'
-        tg('sendMessage', {'chat_id': CHAT_ID, 'text': f'{head}\nпо поставке {what}', 'reply_to_message_id': msg.get('message_id')})
+        upd_signed(num, e, msg.get('message_id'), (SIGNER_BY_ID.get(cq.get('from', {}).get('id')) or {}).get('name', ''))
     else:
         if e.get('demo'):
             tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'В примере не переспрашиваю'})
@@ -665,15 +699,10 @@ def main():
             tg('sendMessage', {'chat_id': CHAT_ID, 'text': '⚠️ Бота сейчас можно добавить в любую группу. Закройте это: @BotFather → /setjoingroups → выбрать бота → Disable.'})
     if os.environ.get('DEMO') == 'supply_acceptance':
         send_demo_acceptance()
-    if os.environ.get('DEMO') == 'upd':  # пример на настоящей поставке в пути, если она есть
-        try:
-            s = next((s for s in supplies(done_max=0) if s['state'] != 'COMPLETED'), None)
-        except Exception:
-            s = None
-        if s:
-            ask_upd('demo', qty(s), demo=True, city=s.get('city') or '', shown=s['number'])
-        else:
-            ask_upd('demo', 0, demo=True)
+    if os.environ.get('DEMO') == 'upd':
+        demo_upd_question()
+    if os.environ.get('DEMO') == 'upd_yes':
+        demo_upd_yes()
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=watcher, daemon=True).start()
     log.info('bot started')  # имя бота в лог не пишем: логи Actions публичные
