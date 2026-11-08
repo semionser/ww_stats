@@ -129,7 +129,21 @@ def send_dashboard(final_day=None):
                 return
             if not final_day:
                 cache.update(t=time.time(), png=png, caption=cap)
-    tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': cap, 'parse_mode': 'HTML'}, files={'photo': ('ozon.png', png)})
+    r = tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': cap, 'parse_mode': 'HTML'}, files={'photo': ('ozon.png', png)})
+    if r and not final_day:
+        replace_now(r['message_id'])
+
+
+def replace_now(new_id):
+    """Новый ответ на /now пришёл — прошлые удаляем, в группе остаётся один свежий дашборд.
+    Итог за вчера в 9:00 не трогаем. Свои сообщения бот может удалять только первые 48 часов,
+    более старые Telegram не даст удалить — их просто забываем."""
+    with slock:
+        st = load_state(); old = st.get('now_msgs') or []
+        st['now_msgs'] = [new_id]; save_state(st)
+    for mid in old:
+        if mid != new_id:
+            tg('deleteMessage', {'chat_id': CHAT_ID, 'message_id': mid})
 
 
 def load_state():
