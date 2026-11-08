@@ -198,6 +198,30 @@ def _cargo_tracking(supply_ids):
     return out
 
 
+_cl = {'t': 0, 'macro': {}, 'wh': {}}
+
+
+def _clusters():
+    """Кластеры Ozon: macrolocal_cluster_id → название и склад → название кластера. Меняются редко, кэш на сутки."""
+    if _cl['macro'] and time.time() - _cl['t'] < 86400:
+        return _cl
+    macro, wh = {}, {}
+    for t in ('CLUSTER_TYPE_OZON', 'CLUSTER_TYPE_CIS'):
+        for c in call('/v1/cluster/list', {"cluster_type": t}).get('clusters') or []:
+            name = c.get('name') or ''
+            macro[str(c.get('macrolocal_cluster_id'))] = name
+            for lc in c.get('logistic_clusters') or []:
+                for w in lc.get('warehouses') or []:
+                    wh[w.get('name')] = name
+    _cl.update(t=time.time(), macro=macro, wh=wh)
+    return _cl
+
+
+def city(cluster):
+    """«Санкт-Петербург и СЗО» → «Санкт-Петербург», «Москва, МО и Дальние регионы» → «Москва»."""
+    return cluster.split(',')[0].split(' и ')[0].strip()
+
+
 def supplies(done_days=14, done_max=3):
     """Поставки FBO: все незавершённые и до done_max завершённых за последние done_days дней, с составом."""
     ts = lambda s: datetime.datetime.fromisoformat(s[:19]) + MSK if s else None
@@ -207,6 +231,10 @@ def supplies(done_days=14, done_max=3):
     ids = active + done
     for i in range(0, len(ids), 50):
         orders += call('/v3/supply-order/get', {"order_ids": ids[i:i + 50]}).get('orders') or []
+    try:
+        CL = _clusters()
+    except Exception:  # без кластеров просто не покажем город
+        CL = _cl
     track = _cargo_tracking([s['supply_id'] for o in orders for s in o.get('supplies') or [] if s.get('supply_id')])
     out = []
     since = _now() - datetime.timedelta(done_days)
@@ -219,6 +247,11 @@ def supplies(done_days=14, done_max=3):
             n_done += 1
         slot = ((o.get('timeslot') or {}).get('timeslot') or {}).get('from')
         stor = [((s.get('storage_warehouse') or {}).get('name') or '') for s in o.get('supplies') or []]
+        cities = []
+        for s in o.get('supplies') or []:  # куда едет: кластер назначения, а если его нет — кластер склада
+            c = CL['macro'].get(str(s.get('macrolocal_cluster_id'))) or CL['wh'].get((s.get('storage_warehouse') or {}).get('name'))
+            if c and city(c) not in cities:
+                cities.append(city(c))
         items = []
         tr = {'eta': None, 'boxes': 0, 'arrived': 0}
         for s in o.get('supplies') or []:
@@ -233,7 +266,7 @@ def supplies(done_days=14, done_max=3):
                     "dropoff": (o.get('drop_off_warehouse') or {}).get('name') or '',
                     "crossdock": any(s.get('is_crossdock') for s in o.get('supplies') or []),
                     "eta": tr['eta'], "boxes": tr['boxes'], "boxes_arrived": tr['arrived'],
-                    "storage": [x for x in stor if x],
+                    "storage": [x for x in stor if x], "city": ', '.join(cities),
                     "items": [(k, q, NAMES.get(k, nm)) for k, q, nm in items]})
     return out
 

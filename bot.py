@@ -160,21 +160,21 @@ def next_ask(t):
     return n
 
 
-def upd_question(num, q, demo=False):
+def upd_question(num, q, demo=False, city=''):
     who = ''.join(f' @{x["username"]}' for x in SIGNERS if x.get('username'))
-    tail = '🧪 пример, поставка выдумана' if demo else f'Поставка №{num}' + (f' · {q} шт' if q else '')
+    tail = '🧪 пример, поставка выдумана' if demo else f'Поставка №{num}' + (f' → {city}' if city else '') + (f' · {q} шт' if q else '')
     return f'УПД подписал?{who}\n{tail}'
 
 
-def ask_upd(num, q, demo=False):
+def ask_upd(num, q, demo=False, city=''):
     """Шлёт вопрос с кнопками ДА/НЕТ; у прошлого вопроса по этой поставке кнопки убирает."""
     kb = {'inline_keyboard': [[{'text': 'ДА', 'callback_data': f'upd:{num}:y'}, {'text': 'НЕТ', 'callback_data': f'upd:{num}:n'}]]}
-    r = tg('sendMessage', {'chat_id': CHAT_ID, 'text': upd_question(num, q, demo), 'reply_markup': kb})
+    r = tg('sendMessage', {'chat_id': CHAT_ID, 'text': upd_question(num, q, demo, city), 'reply_markup': kb})
     if not r:
         return
     with slock:
         st = load_state(); u = st.setdefault('upd', {}); old = u.get(num)
-        u[num] = {'q': q, 'msg': r['message_id'], 'next': next_ask(msk_now()).isoformat(), 'demo': demo}
+        u[num] = {'q': q, 'c': city, 'msg': r['message_id'], 'next': next_ask(msk_now()).isoformat(), 'demo': demo}
         save_state(st)
     if old and old.get('msg'):
         tg('editMessageReplyMarkup', {'chat_id': CHAT_ID, 'message_id': old['msg'], 'reply_markup': {'inline_keyboard': []}})
@@ -189,7 +189,7 @@ def check_upd():
         due = [(n, e) for n, e in (load_state().get('upd') or {}).items()
                if not e.get('demo') and datetime.datetime.fromisoformat(e['next']) <= now]
     for n, e in due:
-        ask_upd(n, e.get('q'))
+        ask_upd(n, e.get('q'), city=e.get('c') or '')
 
 
 def on_upd_answer(cq):
@@ -212,7 +212,7 @@ def on_upd_answer(cq):
             else:
                 e['next'] = next_ask(msk_now()).isoformat()
             st['upd'] = u; save_state(st)
-    base = upd_question(num, e.get('q') if e else None, bool(e and e.get('demo')))
+    base = upd_question(num, e.get('q') if e else None, bool(e and e.get('demo')), (e or {}).get('c') or '')
     if e is None:
         tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'Уже отмечено'})
         tg('editMessageReplyMarkup', {'chat_id': CHAT_ID, 'message_id': msg.get('message_id'), 'reply_markup': {'inline_keyboard': []}})
@@ -222,7 +222,7 @@ def on_upd_answer(cq):
         tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': '✅'})
         tg('editMessageText', {'chat_id': CHAT_ID, 'message_id': msg.get('message_id'), 'text': base + '\n✅ подписан'})
         name = (SIGNER_BY_ID.get(cq.get('from', {}).get('id')) or {}).get('name', '')
-        what = '🧪 пример' if e.get('demo') else f'№{num}' + (f' · {e["q"]} шт' if e.get('q') else '')
+        what = '🧪 пример' if e.get('demo') else f'№{num}' + (f' → {e["c"]}' if e.get('c') else '') + (f' · {e["q"]} шт' if e.get('q') else '')
         head = f'#{name.lower().replace(" ", "")}подписал {name} сделал работу WW 🎉🎉🎉' if name else 'УПД подписан WW 🎉🎉🎉'
         tg('sendMessage', {'chat_id': CHAT_ID, 'text': f'{head}\nпо поставке {what}', 'reply_to_message_id': msg.get('message_id')})
     else:
@@ -267,7 +267,8 @@ SUPPLY_ICON = {'DATA_FILLING': '📝', 'READY_TO_SUPPLY': '📦', 'ACCEPTED_AT_S
                'ACCEPTANCE_AT_STORAGE_WAREHOUSE': '🔍', 'REPORTS_CONFIRMATION_AWAITING': '📄', 'COMPLETED': '✅',
                'REPORT_REJECTED': '⚠️', 'REJECTED_AT_SUPPLY_WAREHOUSE': '⛔', 'CANCELLED': '❌', 'OVERDUE': '⌛'}
 SUPPLY_FAIL_AT = {'REJECTED_AT_SUPPLY_WAREHOUSE': 3, 'REPORT_REJECTED': 6}  # на каком этапе застряла
-wh = lambda s: ' '.join(w if len(w) <= 2 else w.capitalize() for w in s.replace('_', ' ').split())
+ABBR = {'МО', 'РФЦ', 'МРФЦ', 'СЦ', 'КГТ', 'ППЗ', 'АППЗ', 'ХАБ'}
+wh = lambda s: ' '.join(w if w in ABBR or w.isdigit() else (w.lower() if len(w) <= 2 else w.capitalize()) for w in s.replace('_', ' ').split())
 dm = lambda t: t.strftime('%d.%m %H:%M') if t else '—'
 ru = lambda st: SUPPLY_RU.get(st, html.escape(str(st)))
 qty = lambda s: sum(q for _, q, _ in s['items'])
@@ -293,10 +294,10 @@ def coming_of(S):
     return c
 
 
-def supply_block(num, st, line=None, changed=False, prev=None):
-    """Карточка поставки. changed: отметить 🔔, жирный статус и «было: …»."""
+def supply_block(num, st, line=None, changed=False, prev=None, city=''):
+    """Карточка поставки. city — куда едет. changed: отметить 🔔, жирный статус и «было: …»."""
     e = html.escape
-    B = [f'{SUPPLY_ICON.get(st, "📦")} <b>№{e(num)}</b>' + (' 🔔' if changed else ''),
+    B = [f'{SUPPLY_ICON.get(st, "📦")} <b>№{e(num)}' + (f' → {e(city)}' if city else '') + '</b>' + (' 🔔' if changed else ''),
          f'{bar(st)} ' + (f'<b>{ru(st)}</b>' if changed else ru(st))]
     if changed:
         B.append('<i>новая поставка</i>' if prev is None else f'<i>было: {ru(prev)}</i>')
@@ -368,13 +369,14 @@ def supplies_text(S, changed=None, gone=()):
     e = html.escape; changed = changed or {}
     act = [s for s in S if s['state'] != 'COMPLETED']
     L = []
+    to = lambda c: f' → {e(c)}' if c else ''
     for g in gone:
-        L += [f'🔔 <b>Поставка №{e(g["number"])}: {ru(g["state"])}</b>']
+        L += [f'🔔 <b>Поставка №{e(g["number"])}{to(g.get("city"))}: {ru(g["state"])}</b>']
     for s in act:
         if s['id'] in changed:
-            L += [f'🔔 <b>Поставка №{e(s["number"])}: {ru(s["state"])}</b>']
+            L += [f'🔔 <b>Поставка №{e(s["number"])}{to(s.get("city"))}: {ru(s["state"])}</b>']
     for g in gone:
-        B = supply_block(g['number'], g['state'], None, True, g['prev'])
+        B = supply_block(g['number'], g['state'], None, True, g['prev'], g.get('city'))
         B[-1] += f' · <b>{g["qty"]} шт</b>'
         L += [''] + B
     if L:
@@ -383,8 +385,12 @@ def supplies_text(S, changed=None, gone=()):
     now = msk_now()
     tdays = transit_days() if any(s.get('crossdock') and not s.get('eta') and s['state'] in BEFORE_DROP + ON_THE_WAY for s in act) else 0
     for s in act:
-        where = wh(s['dropoff']) + (' → ' + ', '.join(map(wh, s['storage'])) if s['storage'] else '')
-        B = supply_block(s['number'], s['state'], f'{e(where)} · <b>{qty(s)} шт</b>', s['id'] in changed, changed.get(s['id']))
+        stor = ', '.join(map(wh, s['storage']))
+        if s.get('crossdock'):  # сдаём в точку отгрузки, оттуда Ozon везёт на склад в другом городе
+            where = 'через ' + wh(s['dropoff']) + (f' · склад {stor}' if stor else '')
+        else:
+            where = 'склад ' + (stor or wh(s['dropoff']))
+        B = supply_block(s['number'], s['state'], f'{e(where)} · <b>{qty(s)} шт</b>', s['id'] in changed, changed.get(s['id']), s.get('city'))
         t = timing(s, now, tdays)
         L += [''] + B + ([t] if t else [])
     return '\n'.join(L)
@@ -400,7 +406,7 @@ def check_supplies():
         st = load_state()
     first = 'supplies' not in st
     old = st.get('supplies') or {}
-    new = {i: {'n': s['number'], 's': s['state'], 'q': qty(s)} for i, s in cur.items()}
+    new = {i: {'n': s['number'], 's': s['state'], 'q': qty(s), 'c': s.get('city') or ''} for i, s in cur.items()}
     changed = {s['id']: (old[i]['s'] if i in old else None) for i, s in cur.items() if i not in old or old[i]['s'] != s['state']}
     gone, lost = [], [i for i in old if i not in cur]
     if lost:
@@ -410,7 +416,7 @@ def check_supplies():
             if g is None or g in SUPPLY_ACTIVE:  # сбой выдачи списка: не шумим, проверим в следующий раз
                 new[i] = old[i]
             else:
-                gone.append({'number': old[i]['n'], 'state': g, 'qty': old[i]['q'], 'prev': old[i]['s']})
+                gone.append({'number': old[i]['n'], 'state': g, 'qty': old[i]['q'], 'prev': old[i]['s'], 'city': old[i].get('c') or ''})
     arrived = [(msk_now() if not s['updated'] else s['updated']) - s['slot'] for i, s in cur.items()
                if s.get('crossdock') and s['slot'] and i in old and old[i]['s'] in ON_THE_WAY
                and s['state'] in ('ACCEPTANCE_AT_STORAGE_WAREHOUSE', 'REPORTS_CONFIRMATION_AWAITING')]
@@ -420,7 +426,7 @@ def check_supplies():
             return  # не дошло: состояние не сохраняем, повторим через 15 минут
         for g in gone:
             if g['state'] == 'COMPLETED':
-                ask_upd(g['number'], g['qty'])
+                ask_upd(g['number'], g['qty'], city=g['city'])
     with slock:
         st = load_state(); st['supplies'] = new
         if arrived:
