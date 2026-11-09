@@ -216,8 +216,12 @@ def on_period(cq):
     if period not in PERIOD_LABEL or not msg.get('message_id') or (USERS and cq.get('from', {}).get('id') not in USERS):
         tg('answerCallbackQuery', {'callback_query_id': cq['id']}); return
     fresh = (cache.get(period) or {}).get('t', 0) > time.time() - COOLDOWN
+    shown = next((b.get('callback_data', '')[5:] for row in (msg.get('reply_markup') or {}).get('inline_keyboard', [])
+                  for b in row if b.get('text', '').startswith('•')), None)
+    if period == shown and fresh:  # повторное нажатие той же кнопки: картинка та же, Telegram ответил бы ошибкой
+        tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'Уже показано'}); return
     tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': '' if fresh else f'Собираю: {PERIOD_LABEL[period].lower()}…'})
-    edit_dashboard(msg['message_id'], period)
+    log.info('period button: %s', 'ok' if edit_dashboard(msg['message_id'], period) else 'failed')
 
 
 def edit_dashboard(message_id, period):
@@ -231,14 +235,15 @@ def edit_dashboard(message_id, period):
 
 
 def selftest_buttons():
-    """Проверка кнопок без людей: тихо шлём дашборд, переключаем на 7 дней тем же кодом, что и кнопка, и удаляем."""
+    """Проверка кнопок без людей: тихо шлём дашборд, переключаем 7 дней → 30 дней → сегодня тем же кодом,
+    что и кнопка, и удаляем."""
     d = dashboard()
     r = d and tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': d[1], 'parse_mode': 'HTML', 'disable_notification': 'true',
                                'reply_markup': period_kb('now')}, files={'photo': ('ozon.png', d[0])})
     if not r:
         log.warning('selftest: send failed'); return
-    ok = edit_dashboard(r['message_id'], 'week')
-    log.info('selftest: edit %s', 'ok' if ok else 'failed')
+    for period in ('week', 'month', 'now'):
+        log.info('selftest: %s %s', period, 'ok' if edit_dashboard(r['message_id'], period) else 'failed')
     tg('deleteMessage', {'chat_id': CHAT_ID, 'message_id': r['message_id']})
 
 
