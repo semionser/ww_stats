@@ -19,7 +19,8 @@ permissions:
   contents: read
 concurrency:
   group: serve
-  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+  # push и ручной запуск сменяют бота сразу; следующая смена от job next ждёт, пока текущая допишет (секунды)
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.actor != 'github-actions[bot]' }}
 jobs:
   serve:
     runs-on: ubuntu-24.04
