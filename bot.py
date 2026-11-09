@@ -17,7 +17,7 @@
 - только исходящие запросы (long polling), никаких открытых портов и вебхуков;
 - ключи только из переменных окружения, в лог не пишутся.
 """
-import collections, datetime, hashlib, hmac, html, json, statistics, logging, os, sys, tempfile, threading, time, urllib.request, urllib.error, uuid
+import collections, datetime, hashlib, hmac, html, json, re, statistics, logging, os, sys, tempfile, threading, time, urllib.request, urllib.error, uuid
 
 _missing = [k for k in ('TELEGRAM_BOT_TOKEN', 'ALLOWED_CHAT_ID', 'OZON_CLIENT_ID', 'OZON_API_KEY', 'PRODUCTS_JSON') if not os.environ.get(k)]
 if _missing and sys.argv[1:2] != ['test']:
@@ -97,10 +97,21 @@ def tg(method, data=None, files=None, timeout=70):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read()).get('result')
     except urllib.error.HTTPError as e:
-        log.warning('telegram %s: HTTP %s', method, e.code)  # без URL: в нём токен
+        log.warning('telegram %s: HTTP %s%s', method, e.code, tg_reason(e))  # без URL: в нём токен
     except Exception as e:
         log.warning('telegram %s: %s', method, type(e).__name__)
     return None
+
+
+def tg_reason(e):
+    """Причина ошибки от Telegram для лога, без данных: текст в кавычках и все числа вырезаем
+    (там могли бы оказаться куски подписи или id). Остаётся вроде «Bad Request: message to edit not found»."""
+    try:
+        d = json.loads(e.read()).get('description') or ''
+    except Exception:
+        return ''
+    d = re.sub(r'\d+', '#', re.sub(r'"[^"]*"|\'[^\']*\'|<[^>]*>', '…', d))
+    return f' ({d[:100]})' if d else ''
 
 
 def tg_retry(method, data=None, tries=10):
@@ -206,11 +217,29 @@ def on_period(cq):
         tg('answerCallbackQuery', {'callback_query_id': cq['id']}); return
     fresh = (cache.get(period) or {}).get('t', 0) > time.time() - COOLDOWN
     tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': '' if fresh else f'Собираю: {PERIOD_LABEL[period].lower()}…'})
+    edit_dashboard(msg['message_id'], period)
+
+
+def edit_dashboard(message_id, period):
+    """Меняем картинку и подпись в уже отправленном дашборде. Результат Telegram или None."""
     d = dashboard(period=period)
-    if d:
-        tg('editMessageMedia', {'chat_id': CHAT_ID, 'message_id': msg['message_id'], 'reply_markup': period_kb(period),
-                                'media': json.dumps({'type': 'photo', 'media': 'attach://photo', 'caption': d[1], 'parse_mode': 'HTML'})},
-           files={'photo': ('ozon.png', d[0])})
+    if not d:
+        return None
+    return tg('editMessageMedia', {'chat_id': CHAT_ID, 'message_id': message_id, 'reply_markup': period_kb(period),
+                                   'media': json.dumps({'type': 'photo', 'media': 'attach://photo', 'caption': d[1], 'parse_mode': 'HTML'})},
+              files={'photo': ('ozon.png', d[0])})
+
+
+def selftest_buttons():
+    """Проверка кнопок без людей: тихо шлём дашборд, переключаем на 7 дней тем же кодом, что и кнопка, и удаляем."""
+    d = dashboard()
+    r = d and tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': d[1], 'parse_mode': 'HTML', 'disable_notification': 'true',
+                               'reply_markup': period_kb('now')}, files={'photo': ('ozon.png', d[0])})
+    if not r:
+        log.warning('selftest: send failed'); return
+    ok = edit_dashboard(r['message_id'], 'week')
+    log.info('selftest: edit %s', 'ok' if ok else 'failed')
+    tg('deleteMessage', {'chat_id': CHAT_ID, 'message_id': r['message_id']})
 
 
 def replace_now(new_id):
@@ -1034,6 +1063,10 @@ def main():
         demo_records()
     if 'payout' in demo:
         demo_payout()
+    if 'selftest' in demo:  # проверка кнопок периодов; с +exit бот сразу завершается, чтобы лог был виден
+        selftest_buttons()
+        if 'exit' in demo:
+            log.info('run finished'); return
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=watcher, daemon=True).start()
     log.info('bot started')  # имя бота в лог не пишем: логи Actions публичные

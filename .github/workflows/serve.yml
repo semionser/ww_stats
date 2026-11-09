@@ -1,5 +1,6 @@
 name: serve
-# Один запуск живёт ~5 ч 50 мин, следующий по расписанию ждёт в очереди и стартует сразу после него.
+# Один запуск живёт ~5 ч 45 мин и в конце сам ставит следующий (job next). Расписание — запасной путь:
+# GitHub запускает его с опозданием на часы, и одно расписание оставляло бота без связи.
 # Push в main или ручной запуск перезапускает с новым кодом. pull_request намеренно не используется:
 # чужие форки не могут запустить этот workflow и не получают секреты.
 on:
@@ -10,7 +11,7 @@ on:
       demo:
         description: "Разово прислать пример сообщения в группу"
         type: choice
-        options: [none, now, summaries, records, payout, summaries+records, summaries+records+payout, supply_acceptance, upd, upd_yes, supply_acceptance+upd]
+        options: [none, now, summaries, records, payout, summaries+records, summaries+records+payout, selftest+exit, supply_acceptance, upd, upd_yes, supply_acceptance+upd]
         default: none
   push:
     branches: [main]
@@ -55,3 +56,18 @@ jobs:
         if: always()
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with: {path: state, key: "state-${{ github.run_id }}-${{ github.run_attempt }}"}
+  next:
+    # Смена закончилась нормально — запускаем следующую сразу, не дожидаясь расписания. Отменённый (push, ручной
+    # запуск) или упавший запуск ничего не ставит, иначе запуски отменяли бы друг друга по кругу. Код из репозитория
+    # здесь не выполняется, секретов нет; у токена только право запускать workflow этого репозитория.
+    needs: serve
+    if: needs.serve.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: gh api -X POST "repos/$REPO/actions/workflows/serve.yml/dispatches" -f ref=main -f "inputs[demo]=none"
