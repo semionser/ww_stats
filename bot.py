@@ -473,7 +473,7 @@ def send_summary(kind, today, demo=False):
         cap = '🧪 <i>Пример: так итог придёт сам</i>\n' + cap
     ok = bool(tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': cap, 'parse_mode': 'HTML'}, files={'photo': ('ozon.png', png)}))
     if ok and lines:
-        tg('sendMessage', {'chat_id': CHAT_ID, 'text': '\n'.join(lines), 'parse_mode': 'HTML'})
+        tg('sendMessage', {'chat_id': CHAT_ID, 'text': '\n'.join(lines + [records.NOTE]), 'parse_mode': 'HTML'})
     return ok
 
 
@@ -573,7 +573,7 @@ def evening(today, tries):
         records.ensure_loaded()
         lines = [text for key, text in records.live() if not seen(key)]
         if lines:
-            tg('sendMessage', {'chat_id': CHAT_ID, 'text': '\n'.join(lines), 'parse_mode': 'HTML'})
+            tg('sendMessage', {'chat_id': CHAT_ID, 'text': '\n'.join(lines + [records.NOTE]), 'parse_mode': 'HTML'})
         done = True
     except Exception as e:
         log.error('evening: %s', type(e).__name__); done = tr['n'] >= 3
