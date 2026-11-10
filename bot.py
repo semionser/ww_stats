@@ -188,8 +188,9 @@ def dashboard(final_day=None, period='now', quiet=False):
 
 
 def period_kb(cur):
-    """Кнопки под дашбордом; выбранная — в точках."""
-    return json.dumps({'inline_keyboard': [[{'text': f'• {t} •' if p == cur else t, 'callback_data': f'dash:{p}'}
+    """Кнопки под дашбордом. Выбранная — в точках и неактивная (Bot API 10.3, disabled: DisabledButton):
+    её нельзя нажать повторно, а старые клиенты Telegram хотя бы видят точки."""
+    return json.dumps({'inline_keyboard': [[{'text': f'• {t} •', 'disabled': {}} if p == cur else {'text': t, 'callback_data': f'dash:{p}'}
                                             for p, t in PERIOD_LABEL.items()]]})
 
 
@@ -242,8 +243,11 @@ def selftest_buttons():
                                'reply_markup': period_kb('now')}, files={'photo': ('ozon.png', d[0])})
     if not r:
         log.warning('selftest: send failed'); return
+    kb = lambda m: [b for row in ((m or {}).get('reply_markup') or {}).get('inline_keyboard', []) for b in row]
+    log.info('selftest: send ok, disabled button %s', 'kept' if any('disabled' in b for b in kb(r)) else 'dropped')
     for period in ('week', 'month', 'now'):
-        log.info('selftest: %s %s', period, 'ok' if edit_dashboard(r['message_id'], period) else 'failed')
+        e = edit_dashboard(r['message_id'], period)
+        log.info('selftest: %s %s', period, ('ok, disabled ' + ('kept' if any('disabled' in b for b in kb(e)) else 'dropped')) if e else 'failed')
     tg('deleteMessage', {'chat_id': CHAT_ID, 'message_id': r['message_id']})
 
 
