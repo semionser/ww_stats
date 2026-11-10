@@ -188,9 +188,8 @@ def dashboard(final_day=None, period='now', quiet=False):
 
 
 def period_kb(cur):
-    """Кнопки под дашбордом. Выбранная — в точках и неактивная (Bot API 10.3, disabled: DisabledButton):
-    её нельзя нажать повторно, а старые клиенты Telegram хотя бы видят точки."""
-    return json.dumps({'inline_keyboard': [[{'text': f'• {t} •', 'disabled': {}} if p == cur else {'text': t, 'callback_data': f'dash:{p}'}
+    """Кнопки под дашбордом; выбранная — в точках."""
+    return json.dumps({'inline_keyboard': [[{'text': f'• {t} •' if p == cur else t, 'callback_data': f'dash:{p}'}
                                             for p, t in PERIOD_LABEL.items()]]})
 
 
@@ -219,8 +218,9 @@ def on_period(cq):
     fresh = (cache.get(period) or {}).get('t', 0) > time.time() - COOLDOWN
     shown = next((b.get('callback_data', '')[5:] for row in (msg.get('reply_markup') or {}).get('inline_keyboard', [])
                   for b in row if b.get('text', '').startswith('•')), None)
-    if period == shown and fresh:  # повторное нажатие той же кнопки: картинка та же, Telegram ответил бы ошибкой
-        tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'Уже показано'}); return
+    # повторное нажатие выбранной кнопки обновляет цифры; в первую минуту картинка та же, Telegram ответил бы ошибкой
+    if period == shown and fresh:
+        tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'Цифры свежие, обновлены меньше минуты назад'}); return
     tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': '' if fresh else f'Собираю: {PERIOD_LABEL[period].lower()}…'})
     log.info('period button: %s', 'ok' if edit_dashboard(msg['message_id'], period) else 'failed')
 
@@ -243,11 +243,8 @@ def selftest_buttons():
                                'reply_markup': period_kb('now')}, files={'photo': ('ozon.png', d[0])})
     if not r:
         log.warning('selftest: send failed'); return
-    kb = lambda m: [b for row in ((m or {}).get('reply_markup') or {}).get('inline_keyboard', []) for b in row]
-    log.info('selftest: send ok, disabled button %s', 'kept' if any('disabled' in b for b in kb(r)) else 'dropped')
     for period in ('week', 'month', 'now'):
-        e = edit_dashboard(r['message_id'], period)
-        log.info('selftest: %s %s', period, ('ok, disabled ' + ('kept' if any('disabled' in b for b in kb(e)) else 'dropped')) if e else 'failed')
+        log.info('selftest: %s %s', period, 'ok' if edit_dashboard(r['message_id'], period) else 'failed')
     tg('deleteMessage', {'chat_id': CHAT_ID, 'message_id': r['message_id']})
 
 
