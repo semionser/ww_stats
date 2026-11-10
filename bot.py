@@ -42,6 +42,9 @@ WORDS = {'щас': 'now', 'ща': 'now', 'сейчас': 'now', 'now': 'now', '�
          'месяц': 'month', 'month': 'month', 'поставки': 'supply', 'supply': 'supply'}
 PERIOD_DAYS = {'week': 7, 'month': 30}  # кнопки под /now: последние 7 и 30 дней, включая сегодня
 PERIOD_LABEL = {'now': 'Сегодня', 'week': '7 дней', 'month': '30 дней', 'top': 'Топ'}  # «Топ» — лучшие дни за всё время
+# на кнопках: четыре в ряд на телефоне, «Сегодня» не влезает и обрезается до «Сегод…», поэтому «День»
+BUTTON = {'now': 'День', 'week': '7 дней', 'month': '30 дней', 'top': 'Топ'}
+SHOWN = {}  # message_id дашборда → какой период в нём сейчас (кнопки все одинаковые, по ним не понять)
 WATCH_EVERY = 15 * 60          # как часто проверять склад и паузу в заказах, сек.
 LOW_DAYS, LOW_RESET = 5, 7     # тревога, когда запас < 5 дн; снова следим, когда поднялся до 7+
 GAP_HOURS = 3                  # тревога, если днём 3+ ч нет ни одного заказа
@@ -210,10 +213,9 @@ def dashboard(final_day=None, period='now', quiet=False):
         return png, cap
 
 
-def period_kb(cur):
-    """Кнопки под дашбордом; выбранная — в точках."""
-    return json.dumps({'inline_keyboard': [[{'text': f'• {t} •' if p == cur else t, 'callback_data': f'dash:{p}'}
-                                            for p, t in PERIOD_LABEL.items()]]})
+def period_kb(cur=None):
+    """Кнопки под дашбордом, все одинаковые: какой период открыт, видно по заголовку картинки и подписи."""
+    return json.dumps({'inline_keyboard': [[{'text': t, 'callback_data': f'dash:{p}'} for p, t in BUTTON.items()]]})
 
 
 def send_dashboard(final_day=None, quiet=False, period='now'):
@@ -228,6 +230,7 @@ def send_dashboard(final_day=None, quiet=False, period='now'):
         data['reply_markup'] = period_kb(period)
     r = tg('sendPhoto', data, files={'photo': ('ozon.png', d[0])})
     if r and not final_day:
+        SHOWN[r['message_id']] = period
         replace_now(r['message_id'])
     return bool(r)
 
@@ -239,8 +242,8 @@ def on_period(cq):
     if period not in PERIOD_LABEL or not msg.get('message_id') or (USERS and cq.get('from', {}).get('id') not in USERS):
         tg('answerCallbackQuery', {'callback_query_id': cq['id']}); return
     fresh = (cache.get(period) or {}).get('t', 0) > time.time() - COOLDOWN
-    shown = next((b.get('callback_data', '')[5:] for row in (msg.get('reply_markup') or {}).get('inline_keyboard', [])
-                  for b in row if b.get('text', '').startswith('•')), None)
+    shown = SHOWN.get(msg['message_id']) or next((b.get('callback_data', '')[5:] for row in (msg.get('reply_markup') or {}).get('inline_keyboard', [])
+                                                  for b in row if b.get('text', '').startswith('•')), None)  # у старых дашбордов — точки
     # повторное нажатие выбранной кнопки обновляет цифры; в первую минуту картинка та же, Telegram ответил бы ошибкой
     if period == shown and fresh:
         tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'Цифры свежие, обновлены меньше минуты назад'}); return
@@ -259,9 +262,12 @@ def edit_dashboard(message_id, period):
     d = dashboard(period=period)
     if not d:
         return None
-    return tg('editMessageMedia', {'chat_id': CHAT_ID, 'message_id': message_id, 'reply_markup': period_kb(period),
-                                   'media': json.dumps({'type': 'photo', 'media': 'attach://photo', 'caption': d[1], 'parse_mode': 'HTML'})},
-              files={'photo': ('ozon.png', d[0])})
+    r = tg('editMessageMedia', {'chat_id': CHAT_ID, 'message_id': message_id, 'reply_markup': period_kb(period),
+                                'media': json.dumps({'type': 'photo', 'media': 'attach://photo', 'caption': d[1], 'parse_mode': 'HTML'})},
+           files={'photo': ('ozon.png', d[0])})
+    if r:
+        SHOWN[message_id] = period
+    return r
 
 
 def selftest_buttons():
