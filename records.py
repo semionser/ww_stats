@@ -169,11 +169,15 @@ def today_totals():
     return o, s, {k: c[now.date()] for k, c in prod.items() if now.date() in c}
 
 
+_ll = threading.Lock()  # 22:00, итоги и кнопка «Топ» могут попросить историю одновременно — собираем один раз
+
+
 def ensure_loaded():
-    if not H['ready']:
-        load()
-    else:
-        ensure_fresh()
+    with _ll:
+        if not H['ready']:
+            load()
+        else:
+            ensure_fresh()
 
 
 def live(now=None, cur=None):
@@ -215,3 +219,27 @@ def status():
         so = {k: v[0] for k, v in H['day'].items() if k < today}; ss = {k: v[1] for k, v in H['day'].items() if k < today}
     return {'orders': _top(so, today), 'sum': _top(ss, today), 'total_orders': sum(so.values()), 'total_sum': sum(ss.values()),
             'first': min(so) if so else None}
+
+
+# ---------- кнопка «Топ» под дашбордом ----------
+def top(cur=None, n=10):
+    """Лучшие дни за всё время по сумме и по заказам, вместе с сегодняшним (cur = (шт, ₽) на сейчас),
+    место сегодняшнего дня и лучшие недели и месяцы. Всё по всем заказам, вместе с отменёнными."""
+    today = _now().date()
+    with hl:
+        days = {k: tuple(v) for k, v in H['day'].items() if k < today}
+    if cur:
+        days[today] = (cur[0], cur[1])
+    rows = [(d, o, s) for d, (o, s) in days.items() if o]
+    by_sum = sorted(rows, key=lambda r: (-r[2], -r[1], r[0]))
+    by_ord = sorted(rows, key=lambda r: (-r[1], -r[2], r[0]))
+    rank = lambda lst: next((i + 1 for i, r in enumerate(lst) if r[0] == today), None)
+    def best(key, k=3):
+        acc = collections.defaultdict(lambda: [0, 0.0])
+        for d, o, s in rows:
+            acc[key(d)][0] += o; acc[key(d)][1] += s
+        first = min(acc) if acc else None
+        return sorted(((p, o, s) for p, (o, s) in acc.items() if p != first), key=lambda r: -r[2])[:k]  # первый неполный не в счёт
+    return {'today': today, 'cur': days.get(today), 'first': min(days) if days else None, 'n_days': len(rows),
+            'by_sum': by_sum[:n], 'by_orders': by_ord[:n], 'rank_sum': rank(by_sum), 'rank_orders': rank(by_ord),
+            'weeks': best(lambda d: d - datetime.timedelta(d.weekday())), 'months': best(lambda d: d.replace(day=1))}

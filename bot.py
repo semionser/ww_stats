@@ -25,7 +25,7 @@ if _missing and sys.argv[1:2] != ['test']:
 
 import records
 from ozon_data import collect, collect_period, collect_summary, call as ozon_call, MSK, NAMES, watch, supplies, supply_states, transit_history, prices, SUPPLY_ACTIVE
-from widget import widget_html
+from widget import widget_html, top_html
 from render import to_png
 
 TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
@@ -41,7 +41,7 @@ COMMANDS = {'/now': 'now', '/щас': 'now', '/now_week': 'week', '/неделя
 WORDS = {'щас': 'now', 'ща': 'now', 'сейчас': 'now', 'now': 'now', 'неделя': 'week', 'week': 'week',
          'месяц': 'month', 'month': 'month', 'поставки': 'supply', 'supply': 'supply'}
 PERIOD_DAYS = {'week': 7, 'month': 30}  # кнопки под /now: последние 7 и 30 дней, включая сегодня
-PERIOD_LABEL = {'now': 'Сегодня', 'week': '7 дней', 'month': '30 дней'}
+PERIOD_LABEL = {'now': 'Сегодня', 'week': '7 дней', 'month': '30 дней', 'top': 'Топ'}  # «Топ» — лучшие дни за всё время
 WATCH_EVERY = 15 * 60          # как часто проверять склад и паузу в заказах, сек.
 LOW_DAYS, LOW_RESET = 5, 7     # тревога, когда запас < 5 дн; снова следим, когда поднялся до 7+
 GAP_HOURS = 3                  # тревога, если днём 3+ ч нет ни одного заказа
@@ -166,7 +166,30 @@ def render(A, final=False):
 
 
 def build(final_day=None, period='now'):
+    if period == 'top':
+        return build_top()
     return render(collect_period(PERIOD_DAYS[period]) if period in PERIOD_DAYS else collect(final_day), bool(final_day))
+
+
+def build_top():
+    """Кнопка «Топ»: лучшие дни за всё время и место сегодняшнего. Нужна вся история заказов: если её ещё нет
+    в памяти этой смены, сбор ~2 мин (в 22:00 она собирается всё равно, после этого — секунды)."""
+    records.ensure_loaded()
+    o, s, _ = records.today_totals()
+    T = records.top(cur=(o, s))
+    now = msk_now()
+    with tempfile.TemporaryDirectory() as d:
+        p = os.path.join(d, 'ozon.png')
+        to_png(top_html(T, f'{now:%d.%m} · {now:%H:%M} МСК'), p, wide=True)
+        png = open(p, 'rb').read()
+    f = lambda v: f'{v:,.0f}'.replace(',', ' ')
+    bs, bo = T['by_sum'][0], T['by_orders'][0]
+    place = f'{T["rank_sum"]} место по сумме' if T['rank_sum'] else ''
+    cap = (f'<b>Топ дней · за всё время</b>\n'
+           f'Сегодня: <b>{f(s)} ₽</b> · {records.orders_word(o)}' + (f' · {place}' if place else '') + '\n'
+           f'Рекорд: <b>{f(bs[2])} ₽</b> ({bs[0]:%d.%m.%Y}) · <b>{records.orders_word(bo[1])}</b> ({bo[0]:%d.%m.%Y})\n'
+           f'<i>Все заказы, вместе с отменёнными</i>')
+    return png, cap
 
 
 def dashboard(final_day=None, period='now', quiet=False):
@@ -221,7 +244,13 @@ def on_period(cq):
     # повторное нажатие выбранной кнопки обновляет цифры; в первую минуту картинка та же, Telegram ответил бы ошибкой
     if period == shown and fresh:
         tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': 'Цифры свежие, обновлены меньше минуты назад'}); return
-    tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': '' if fresh else f'Собираю: {PERIOD_LABEL[period].lower()}…'})
+    wait = 'Собираю всю историю заказов, около 2 минут…' if period == 'top' and not records.H['ready'] else f'Собираю: {PERIOD_LABEL[period].lower()}…'
+    tg('answerCallbackQuery', {'callback_query_id': cq['id'], 'text': '' if fresh else wait})
+    if period == 'top':  # историю собираем до общего замка дашбордов, чтобы /now не ждал эти 2 минуты
+        try:
+            records.ensure_loaded()
+        except Exception as e:
+            log.error('top history: %s', type(e).__name__)
     log.info('period button: %s', 'ok' if edit_dashboard(msg['message_id'], period) else 'failed')
 
 

@@ -211,3 +211,66 @@ def _wide(A, FINAL=False):
           f'<div style="font-size:11px;color:{P["muted"]};text-align:right;margin-top:1px">≈ {f(avg)} ₽/день</div>{w7}</div>')
   return (f'<div style="{FONT}color:{P["text"]};display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start">'
           f'<div style="display:grid;gap:10px;min-width:0">{left}</div><div style="display:grid;gap:10px;min-width:0">{right}</div></div>')
+
+
+WD = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс']
+MON = ['', 'январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь']
+
+
+def top_html(T, when):
+  """Кнопка «Топ»: лучшие дни за всё время по сумме и по заказам, место сегодняшнего дня, лучшие недели и месяцы.
+  T — records.top(), when — «10.11 · 22:21 МСК». Тот же вид, что у широкого дашборда."""
+  P=PAL
+  f=lambda v:f"{v:,.0f}".replace(',',' ')
+  k=lambda v:(f'{v/1e6:.2f}M' if abs(v)>=1e6 else f'{v/1000:.1f}k' if abs(v)<100000 else f'{v/1000:.0f}k').replace('.0k','k')
+  C=f'background:{P["card"]};border-radius:14px;padding:14px 16px;'
+  td=T['today'];cur=T['cur'] or (0,0.0)
+  dd=lambda d:d.strftime('%d.%m.%Y')
+  bs,bo=T['by_sum'],T['by_orders']
+  medal=['#d4a017','#9aa4ae','#b8733d']
+  def chip(i):
+    c=medal[i] if i<3 else P['muted']
+    return f'<span style="display:inline-block;width:20px;height:20px;line-height:20px;border-radius:999px;text-align:center;font-size:11px;font-weight:700;background:{c}{"26" if i<3 else "1a"};color:{c}">{i+1}</span>'
+  def table(title,lst,main):
+    mx=max([r[2 if main=='s' else 1] for r in lst]+[1])
+    G='display:grid;grid-template-columns:22px minmax(0,1fr) 92px 44px;gap:8px;align-items:center'
+    h=(f'<div style="{C}"><div style="font-size:13px;margin-bottom:6px"><b>{title}</b></div>'
+       f'<div style="{G};font-size:11px;color:{P["muted"]};padding-bottom:4px"><span>#</span><span>День</span>'
+       f'<span>{"Сумма" if main=="s" else "Заказы"}</span><span style="text-align:right">{"Заказы" if main=="s" else "Сумма"}</span></div>')
+    for i,(d,o,s) in enumerate(lst):
+      v=s if main=='s' else o;me=d==td
+      bar=f'<span style="display:inline-block;height:6px;border-radius:3px;background:{P["accent"] if me else P["bar"]};width:{max(3,round(30*v/mx))}px;margin-right:6px;vertical-align:middle"></span>'
+      bg=f'background:{P["accent"]}14;border-radius:8px;margin:0 -6px;padding:4px 6px;' if me else 'padding:4px 0;'
+      h+=(f'<div style="{G};{bg}border-top:1px solid {P["grid"] if not me else "transparent"};font-size:13px">{chip(i)}'
+          f'<span style="white-space:nowrap">{"<b style=%scolor:%s%s>сегодня</b>" % (chr(34),P["accent"],chr(34)) if me else dd(d)} <span style="color:{P["muted"]};font-size:11px">{WD[d.weekday()]}</span></span>'
+          f'<span style="white-space:nowrap">{bar}<b>{k(s) if main=="s" else o}</b></span>'
+          f'<span style="text-align:right;color:{P["sub"]}">{o if main=="s" else k(s)}</span></div>')
+    return h+'</div>'
+  rs,ro=T['rank_sum'],T['rank_orders']
+  gap=lambda pos:bs[pos][2]-cur[1]  # сколько ₽ не хватает до места pos+1
+  place=lambda r:f'{r} место' if r else '—'
+  if rs==1: line=f'<span style="color:{P["good"]};font-weight:600">рекорд за всё время</span>'
+  else:
+    line=f'до рекорда <b>+{f(gap(0))} ₽</b>'
+    if rs and rs>3: line=f'до 3-го места <b>+{f(gap(2))} ₽</b> · '+line
+  left=(f'<div style="{C}"><div style="display:flex;justify-content:space-between;color:{P["muted"]};font-size:12px"><span>Сегодня в топе по сумме</span><span>{when}</span></div>'
+        f'<div style="font-size:40px;font-weight:700;letter-spacing:-.5px;line-height:1.1;margin-top:2px;white-space:nowrap">{place(rs)}</div>'
+        f'<div style="margin-top:6px;font-size:15px;white-space:nowrap"><b>{f(cur[1])} ₽</b> · {cur[0]} {plural(cur[0],"заказ","заказа","заказов")} <span style="color:{P["muted"]};font-size:12px">· из {f(T["n_days"])} дней</span></div>'
+        f'<div style="color:{P["muted"]};font-size:12px;margin-top:2px">{line}</div></div>')
+  tiles=[('Рекорд, сумма',k(bs[0][2])+' ₽',dd(bs[0][0])),('Рекорд, заказы',str(bo[0][1]),dd(bo[0][0])),
+         ('Сегодня, заказы',place(ro),('рекорд' if ro==1 else f'до рекорда +{bo[0][1]-cur[0]}'))]
+  left+=('<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">'
+         +''.join(f'<div style="{C}padding:10px 12px;min-width:0"><div style="color:{P["muted"]};font-size:11px;white-space:nowrap">{l}</div><div style="font-size:20px;font-weight:700;margin:2px 0;white-space:nowrap">{v}</div><div style="font-size:11px;color:{P["muted"]}">{d}</div></div>' for l,v,d in tiles)
+         +'</div>')
+  left+=table('Лучшие дни по сумме',bs,'s')
+  right=table('Лучшие дни по заказам',bo,'o')
+  def mini(title,lst,lab):
+    return (f'<div style="font-size:12px;color:{P["muted"]};margin:6px 0 2px">{title}</div>'
+            +''.join(f'<div style="display:grid;grid-template-columns:22px minmax(0,1fr) 60px 44px;gap:8px;align-items:center;border-top:1px solid {P["grid"]};padding:4px 0;font-size:13px">{chip(i)}<span style="white-space:nowrap">{lab(p)}</span><b style="text-align:right">{k(s)}</b><span style="text-align:right;color:{P["sub"]}">{o}</span></div>' for i,(p,o,s) in enumerate(lst)))
+  wk=lambda p:f'{p.strftime("%d.%m")}–{(p+__import__("datetime").timedelta(6)).strftime("%d.%m.%Y")}'+(f' <span style="color:{P["accent"]};font-size:11px">идёт</span>' if p<=td<=p+__import__("datetime").timedelta(6) else '')
+  mn=lambda p:f'{MON[p.month].capitalize()} {p.year}'+(f' <span style="color:{P["accent"]};font-size:11px">идёт</span>' if (p.year,p.month)==(td.year,td.month) else '')
+  right+=(f'<div style="{C}"><div style="display:flex;justify-content:space-between;font-size:13px"><b>Лучшие недели и месяцы</b><span style="font-size:11px;color:{P["muted"]}">сумма · заказы</span></div>'
+          +mini('Недели',T['weeks'],wk)+mini('Месяцы',T['months'],mn)
+          +f'<div style="font-size:11px;color:{P["muted"]};margin-top:8px">Все заказы, вместе с отменёнными · с {dd(T["first"])}</div></div>')
+  return (f'<div style="{FONT}color:{P["text"]};display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start">'
+          f'<div style="display:grid;gap:10px;min-width:0">{left}</div><div style="display:grid;gap:10px;min-width:0">{right}</div></div>')
