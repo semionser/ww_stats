@@ -1050,6 +1050,19 @@ def check_urgent():
         if 'alerts' in st:
             st['alerts'] = al
         save_state(st)
+    T = urgent_text(new_q, crashes, still, P, now)
+    if T:
+        who = mentions()
+        log.info('urgent alert')
+        tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML', 'text': '\n'.join(T + ([''] + [' '.join(who)] if who else []))})
+    if out_q:  # хорошая новость — без отметок и без звука
+        log.info('quarantine over')
+        e = lambda k: html.escape(NAMES.get(k, k))
+        tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML', 'disable_notification': True,
+                           'text': '✅ Вышел из карантина, снова продаётся: ' + ', '.join(f'<b>{e(k)}</b>' for k in out_q)})
+
+
+def urgent_text(new_q, crashes, still, P, now):
     e = lambda k: html.escape(NAMES.get(k, k))
     T = []
     if new_q:
@@ -1066,14 +1079,20 @@ def check_urgent():
         T += [''] if T else []
         T.append('⏰ <b>Всё ещё в карантине</b>, не продаётся')
         T += [f'<b>{e(k)}</b> · с {since_text(t, now)}' for k, t in still]
-    if T:
-        who = mentions()
-        log.info('urgent alert')
-        tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML', 'text': '\n'.join(T + ([''] + [' '.join(who)] if who else []))})
-    if out_q:  # хорошая новость — без отметок и без звука
-        log.info('quarantine over')
-        tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML', 'disable_notification': True,
-                           'text': '✅ Вышел из карантина, снова продаётся: ' + ', '.join(f'<b>{e(k)}</b>' for k in out_q)})
+    return T
+
+
+def demo_urgent():
+    """Пример срочной тревоги с настоящими отметками людей: самый дорогой товар как будто попал в карантин,
+    следующий как будто подешевел на 35%. На самом деле ничего не меняется, состояние не трогаем."""
+    P = prices()
+    ks = sorted([k for k in P if k in NAMES] or P, key=lambda k: -P[k])
+    a, b = ks[0], ks[1 % len(ks)]
+    T = urgent_text([a], [(b, P[b], round(P[b] * 0.65))], [], P, msk_now())
+    who = mentions()
+    log.info('urgent demo')
+    tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML',
+                       'text': '🧪 <i>Пример срочной тревоги, на самом деле всё в порядке</i>\n' + '\n'.join(T + ([''] + [' '.join(who)] if who else []))})
 
 
 def urgent_watch():
@@ -1246,6 +1265,8 @@ def main():
         demo_records()
     if 'payout' in demo:
         demo_payout()
+    if 'urgent' in demo:
+        demo_urgent()
     if 'selftest' in demo:  # проверка кнопок периодов и отметок срочной тревоги; с +exit бот сразу завершается, чтобы лог был виден
         selftest_buttons()
         log.info('urgent mentions: %s', 'ok' if mentions() else 'none')

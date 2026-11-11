@@ -11,7 +11,7 @@ on:
       demo:
         description: "Разово прислать пример сообщения в группу"
         type: choice
-        options: [none, now, summaries, records, payout, summaries+records, summaries+records+payout, selftest+exit, supply_acceptance, upd, upd_yes, supply_acceptance+upd]
+        options: [none, now, summaries, records, payout, urgent, summaries+records, summaries+records+payout, selftest+exit, supply_acceptance, upd, upd_yes, supply_acceptance+upd]
         default: none
   push:
     branches: [main]
