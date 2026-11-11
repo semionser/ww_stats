@@ -387,3 +387,16 @@ def prices():
         if not cur or not d.get('items'):
             break
     return out
+
+
+def quarantine():
+    """Артикулы товаров в карантине. Ozon снимает товар с продажи, если цена изменилась больше чем на 50%,
+    и держит так, пока продавец не подтвердит цену в кабинете."""
+    out, last = set(), ''
+    for _ in range(20):
+        d = call('/v3/product/list', {"filter": {"visibility": "QUARANTINE"}, "last_id": last, "limit": 1000}).get('result') or {}
+        out |= {x['offer_id'] for x in d.get('items') or []}
+        last = d.get('last_id')
+        if not last or not d.get('items'):
+            break
+    return out

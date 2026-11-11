@@ -8,6 +8,8 @@
 После приёмки поставки спрашивает «УПД подписал?» с кнопками ДА/НЕТ и переспрашивает каждые 3 ч днём до «ДА».
 Сам пишет в группу (с 08:00 до 24:00 МСК), когда товар закончился, когда запаса осталось меньше 5 дней,
 когда днём (10:00–22:00) 3+ часа нет заказов, когда цена товара сдвинулась на 10%+ и когда у поставки сменился статус.
+Срочная тревога — в любое время, и ночью тоже, с отметкой всех людей группы: товар попал в карантин Ozon
+или его цена упала на 30%+ от самой высокой за сутки.
 
 Безопасность:
 - работает только в одном чате (ALLOWED_CHAT_ID); из любых других чатов сразу выходит и ничего не отвечает;
@@ -24,7 +26,7 @@ if _missing and sys.argv[1:2] != ['test']:
     sys.exit('Не заданы секреты: ' + ', '.join(_missing))
 
 import records
-from ozon_data import collect, collect_period, collect_summary, call as ozon_call, MSK, NAMES, watch, supplies, supply_states, transit_history, prices, SUPPLY_ACTIVE
+from ozon_data import collect, collect_period, collect_summary, call as ozon_call, MSK, NAMES, watch, supplies, supply_states, transit_history, prices, quarantine, SUPPLY_ACTIVE
 from widget import widget_html, top_html
 from render import to_png
 
@@ -50,7 +52,10 @@ LOW_DAYS, LOW_RESET = 5, 7     # тревога, когда запас < 5 дн;
 GAP_HOURS = 3                  # тревога, если днём 3+ ч нет ни одного заказа
 DAY_FROM, DAY_TO = 10, 22      # «днём» = с 10:00 до 22:00 МСК; паузу до 10:00 не считаем
 PRICE_JUMP = 0.10              # тревога, если цена товара сдвинулась на 10%+ от последней известной
-QUIET_UNTIL = 8                # с 00:00 до 08:00 МСК бот сам не пишет
+QUIET_UNTIL = 8                # с 00:00 до 08:00 МСК бот сам не пишет (кроме срочной тревоги)
+URGENT_EVERY = 5 * 60          # карантин и обвал цены проверяем каждые 5 минут, днём и ночью
+CRASH = 0.30                   # обвал цены: на 30%+ ниже самой высокой за последние сутки
+URGENT_REMIND = 3 * 3600       # товар всё ещё в карантине — напоминаем каждые 3 ч, ночью не напоминаем
 COOLDOWN = 60  # сек.: чаще одного раза в минуту не дёргаем Ozon, повторяем последнюю картинку
 DAILY_TRIES, DAILY_RETRY = 6, 600   # итог за вчера: если Ozon не ответил, ещё 5 попыток раз в 10 мин
 OZON_DOWN_WARN = 3600               # Ozon не отвечает час подряд — один раз пишем в группу
@@ -82,6 +87,8 @@ slock = threading.Lock()  # state.json пишут несколько поток�
 cache = {}  # период → {'t', 'png', 'caption'}: повтор команды в течение минуты не дёргает Ozon
 scache = {'t': 0, 'text': ''}
 ME = ''
+ME_ID = 0
+PEOPLE = None  # id людей, кто жал кнопки или звал бота в группе (в зашифрованном состоянии), — их тоже отмечаем
 
 
 def tg(method, data=None, files=None, timeout=70):
@@ -912,6 +919,8 @@ def check_alerts():
             else:
                 for k, v in P.items():
                     b = base.get(k)
+                    if b and v <= b * (1 - CRASH):
+                        continue  # обвал: о нём пишет срочная тревога, она же сдвинет точку отсчёта
                     if b and abs(v - b) / b >= PRICE_JUMP:
                         jumps.append((k, b, v)); base[k] = v
                     elif not b:
@@ -953,6 +962,132 @@ def check_alerts():
         T += [f'{e(k)}: {fmt(b)} → <b>{fmt(v)} ₽</b> ({"+" if v > b else "−"}{abs(v - b) / b * 100:.0f}%)' for k, b, v in sorted(jumps, key=lambda x: (x[2] - x[1]) / x[1])]
         log.info('price alert')
         tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML', 'text': '\n'.join(T)})
+
+
+def remember(user, gone=False):
+    """Запоминаем id человека из группы (без имени и текста), чтобы отметить его в срочной тревоге."""
+    global PEOPLE
+    if not user or user.get('is_bot') or not user.get('id'):
+        return
+    uid = user['id']
+    with slock:
+        st = None
+        if PEOPLE is None:
+            st = load_state(); PEOPLE = set(st.get('people') or [])
+        if (uid in PEOPLE) != gone:
+            return
+        (PEOPLE.discard if gone else PEOPLE.add)(uid)
+        st = st or load_state(); st['people'] = sorted(PEOPLE); save_state(st)
+
+
+def mentions():
+    """Кого отметить: люди из ALLOWED_USER_IDS и UPD_SIGNER, админы группы и все, кто звал бота или жал кнопки.
+    Боты (в том числе другой бот группы) и те, кто вышел, пропускаются. Telegram не даёт боту список всех
+    участников, поэтому тот, кто ни разу не нажимал кнопки и не в секретах, сюда не попадёт."""
+    with slock:
+        ppl = set(PEOPLE) if PEOPLE is not None else set(load_state().get('people') or [])
+    ids = set(OWNERS) | set(SIGNER_BY_ID) | ppl
+    for a in tg('getChatAdministrators', {'chat_id': CHAT_ID}) or []:
+        ids.add(a['user']['id'])
+    out = []
+    for uid in sorted(ids - {ME_ID}):
+        m = tg('getChatMember', {'chat_id': CHAT_ID, 'user_id': uid})
+        if m is None:  # Telegram не ответил: подписанта всё равно отметим по имени из секрета
+            s = SIGNER_BY_ID.get(uid) or {}
+            if s.get('username'):
+                out.append('@' + html.escape(str(s['username']).lstrip('@')))
+            continue
+        u = m.get('user') or {}
+        if u.get('is_bot') or m.get('status') in ('left', 'kicked') or (m.get('status') == 'restricted' and not m.get('is_member')):
+            continue
+        out.append('@' + u['username'] if u.get('username') else f'<a href="tg://user?id={uid}">{html.escape(u.get("first_name") or "участник")}</a>')
+    return out
+
+
+def since_text(t, now):
+    return t.strftime('%H:%M') if t.date() == now.date() else t.strftime('%d.%m %H:%M')
+
+
+def check_urgent():
+    """Срочная тревога, в любое время суток: товар попал в карантин Ozon (его сняли с продажи)
+    или цена упала на CRASH+ от самой высокой за сутки. Пишем с отметкой всех людей группы."""
+    now = msk_now(); night = now.hour < QUIET_UNTIL
+    hk, cut = now.strftime('%Y-%m-%dT%H'), (now - datetime.timedelta(hours=24)).strftime('%Y-%m-%dT%H')
+    Q = quarantine()
+    try:
+        P = prices()
+    except Exception as e:
+        log.warning('urgent prices: %s', type(e).__name__); P = {}
+    new_q, still, out_q, crashes = [], [], [], []
+    with slock:
+        st = load_state(); u = st.get('urgent') or {}
+        q = u.get('q') or {}
+        for k in sorted(Q):
+            if k not in q:
+                q[k] = {'since': now.isoformat(timespec='minutes'), 'remind': now.isoformat(timespec='minutes')}; new_q.append(k)
+            elif not night and (now - datetime.datetime.fromisoformat(q[k]['remind'])).total_seconds() >= URGENT_REMIND:
+                q[k]['remind'] = now.isoformat(timespec='minutes'); still.append((k, datetime.datetime.fromisoformat(q[k]['since'])))
+        for k in sorted(set(q) - Q):
+            out_q.append(k); q.pop(k)
+        # цены по часам за сутки: в каждом часе — самая низкая (случайный всплеск вверх не станет точкой отсчёта),
+        # обвал считаем от самой высокой из них
+        al = st.get('alerts') or {}; base = al.get('price') or {}
+        ph = u.get('ph') or {}
+        for k, v in P.items():
+            h = [x for x in ph.get(k, []) if x[0] > cut]
+            ref = max([x[1] for x in h] + [base.get(k) or 0])  # и от точки отсчёта дневной тревоги о цене
+            if ref and v <= ref * (1 - CRASH):
+                crashes.append((k, ref, v)); h = []  # после тревоги новая точка отсчёта — текущая цена
+                if 'price' in al:
+                    al['price'][k] = v  # чтобы дневная тревога «Цена изменилась» не повторила то же самое
+            if h and h[-1][0] == hk:
+                h[-1][1] = min(h[-1][1], v)
+            else:
+                h.append([hk, v])
+            ph[k] = h
+        u['q'], u['ph'] = q, ph
+        st['urgent'] = u
+        if 'alerts' in st:
+            st['alerts'] = al
+        save_state(st)
+    e = lambda k: html.escape(NAMES.get(k, k))
+    T = []
+    if new_q:
+        T.append('🚨 <b>Товар попал в карантин Ozon</b>' if len(new_q) == 1 else '🚨 <b>Товары попали в карантин Ozon</b>')
+        T += [f'<b>{e(k)}</b>' + (f' · сейчас {fmt(P[k])} ₽' if k in P else '') for k in new_q]
+        T.append('Пока цену не подтвердят, товар не продаётся. Обычно так бывает, когда цена изменилась больше чем на 50%. '
+                 'Проверьте цену в кабинете Ozon и подтвердите или исправьте её.')
+    if crashes:
+        T += [''] if T else []
+        T.append('🚨 <b>Цена резко упала</b>')
+        T += [f'<b>{e(k)}</b>: {fmt(b)} → <b>{fmt(v)} ₽</b> (−{(b - v) / b * 100:.0f}%)' for k, b, v in sorted(crashes, key=lambda x: x[2] / x[1])]
+        T.append('Проверьте акции и цену в кабинете Ozon.')
+    if still:
+        T += [''] if T else []
+        T.append('⏰ <b>Всё ещё в карантине</b>, не продаётся')
+        T += [f'<b>{e(k)}</b> · с {since_text(t, now)}' for k, t in still]
+    if T:
+        who = mentions()
+        log.info('urgent alert')
+        tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML', 'text': '\n'.join(T + ([''] + [' '.join(who)] if who else []))})
+    if out_q:  # хорошая новость — без отметок и без звука
+        log.info('quarantine over')
+        tg('sendMessage', {'chat_id': CHAT_ID, 'parse_mode': 'HTML', 'disable_notification': True,
+                           'text': '✅ Вышел из карантина, снова продаётся: ' + ', '.join(f'<b>{e(k)}</b>' for k in out_q)})
+
+
+def urgent_watch():
+    time.sleep(30)
+    try:
+        log.info('urgent mentions: %s', 'ok' if mentions() else 'none')  # только «есть / нет», без id и числа людей
+    except Exception as e:
+        log.error('mentions: %s', type(e).__name__)
+    while True:
+        try:
+            check_urgent()
+        except Exception as e:
+            log.error('urgent: %s', type(e).__name__)
+        time.sleep(URGENT_EVERY)
 
 
 def ozon_health(ok):
@@ -1017,6 +1152,8 @@ def handle(u):
     cq = u.get('callback_query')
     if cq:  # кнопки ДА/НЕТ под вопросом про УПД и кнопки периодов под дашбордом
         mine = (cq.get('message') or {}).get('chat', {}).get('id') == CHAT_ID
+        if mine:
+            remember(cq.get('from'))
         if mine and cq.get('data', '').startswith('upd:'):
             on_upd_answer(cq)
         elif mine and cq.get('data', '').startswith('dash:'):
@@ -1041,6 +1178,11 @@ def handle(u):
         if m['chat']['type'] != 'private':
             tg('leaveChat', {'chat_id': chat})
         return  # чужим ничего не отвечаем
+    remember(m.get('from'))  # служебные «вступил / вышел» Telegram присылает и при privacy mode
+    for x in m.get('new_chat_members') or []:
+        remember(x)
+    if m.get('left_chat_member'):
+        remember(m['left_chat_member'], gone=True)
     if USERS and m.get('from', {}).get('id') not in USERS:
         return
     rep = m.get('reply_to_message') or {}
@@ -1056,11 +1198,11 @@ def handle(u):
 
 
 def main():
-    global ME
+    global ME, ME_ID
     me = tg_retry('getMe')
     if not me:
         sys.exit('Неверный TELEGRAM_BOT_TOKEN или нет связи с Telegram')
-    ME = me['username']
+    ME, ME_ID = me['username'], me['id']
     if me.get('can_read_all_group_messages'):
         sys.exit('Privacy mode выключен: бот видел бы всю переписку. @BotFather → /setprivacy → Enable')
     join_warning = bool(me.get('can_join_groups'))
@@ -1110,6 +1252,7 @@ def main():
             log.info('run finished'); return
     threading.Thread(target=scheduler, daemon=True).start()
     threading.Thread(target=watcher, daemon=True).start()
+    threading.Thread(target=urgent_watch, daemon=True).start()
     log.info('bot started')  # имя бота в лог не пишем: логи Actions публичные
     off = None
     end = time.time() + SERVE_SECONDS if SERVE_SECONDS else None
