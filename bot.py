@@ -1246,8 +1246,9 @@ def main():
         demo_records()
     if 'payout' in demo:
         demo_payout()
-    if 'selftest' in demo:  # проверка кнопок периодов; с +exit бот сразу завершается, чтобы лог был виден
+    if 'selftest' in demo:  # проверка кнопок периодов и отметок срочной тревоги; с +exit бот сразу завершается, чтобы лог был виден
         selftest_buttons()
+        log.info('urgent mentions: %s', 'ok' if mentions() else 'none')
         if 'exit' in demo:
             log.info('run finished'); return
     threading.Thread(target=scheduler, daemon=True).start()
