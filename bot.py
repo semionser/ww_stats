@@ -55,7 +55,7 @@ PRICE_JUMP = 0.10              # тревога, если цена товара 
 QUIET_UNTIL = 8                # с 00:00 до 08:00 МСК бот сам не пишет (кроме срочной тревоги)
 URGENT_EVERY = 5 * 60          # карантин и обвал цены проверяем каждые 5 минут, днём и ночью
 CRASH = 0.30                   # обвал цены: на 30%+ ниже самой высокой за последние сутки
-URGENT_REMIND = 3 * 3600       # товар всё ещё в карантине — напоминаем каждые 3 ч, ночью не напоминаем
+URGENT_REMIND = 3 * 3600       # товар всё ещё в карантине — напоминаем каждые 3 ч, ночью тоже
 COOLDOWN = 60  # сек.: чаще одного раза в минуту не дёргаем Ozon, повторяем последнюю картинку
 DAILY_TRIES, DAILY_RETRY = 6, 600   # итог за вчера: если Ozon не ответил, ещё 5 попыток раз в 10 мин
 OZON_DOWN_WARN = 3600               # Ozon не отвечает час подряд — один раз пишем в группу
@@ -1011,7 +1011,7 @@ def since_text(t, now):
 def check_urgent():
     """Срочная тревога, в любое время суток: товар попал в карантин Ozon (его сняли с продажи)
     или цена упала на CRASH+ от самой высокой за сутки. Пишем с отметкой всех людей группы."""
-    now = msk_now(); night = now.hour < QUIET_UNTIL
+    now = msk_now()  # тихих часов у срочной тревоги нет: и тревога, и напоминания приходят в любое время
     hk, cut = now.strftime('%Y-%m-%dT%H'), (now - datetime.timedelta(hours=24)).strftime('%Y-%m-%dT%H')
     Q = quarantine()
     try:
@@ -1025,7 +1025,7 @@ def check_urgent():
         for k in sorted(Q):
             if k not in q:
                 q[k] = {'since': now.isoformat(timespec='minutes'), 'remind': now.isoformat(timespec='minutes')}; new_q.append(k)
-            elif not night and (now - datetime.datetime.fromisoformat(q[k]['remind'])).total_seconds() >= URGENT_REMIND:
+            elif (now - datetime.datetime.fromisoformat(q[k]['remind'])).total_seconds() >= URGENT_REMIND:
                 q[k]['remind'] = now.isoformat(timespec='minutes'); still.append((k, datetime.datetime.fromisoformat(q[k]['since'])))
         for k in sorted(set(q) - Q):
             out_q.append(k); q.pop(k)
