@@ -1095,6 +1095,23 @@ def demo_urgent():
                        'text': '🧪 <i>Пример срочной тревоги, на самом деле всё в порядке</i>\n' + '\n'.join(T + ([''] + [' '.join(who)] if who else []))})
 
 
+def delete_last():
+    """Удаляет последнее сообщение бота в группе (например, пример тревоги). Номер сообщения узнаём тихим «·»,
+    которое сразу удаляем. Бот не админ, поэтому чужие сообщения Telegram ему удалить не даст: идём назад
+    и удаляем первое своё. Дашборд /now из состояния не трогаем."""
+    probe = tg('sendMessage', {'chat_id': CHAT_ID, 'text': '·', 'disable_notification': True})
+    if not probe:
+        log.warning('delete_last: no probe'); return
+    n = probe['message_id']
+    tg('deleteMessage', {'chat_id': CHAT_ID, 'message_id': n})
+    with slock:
+        keep = set(load_state().get('now_msgs') or [])
+    for i in range(n - 1, max(0, n - 30), -1):
+        if i not in keep and tg('deleteMessage', {'chat_id': CHAT_ID, 'message_id': i}):
+            log.info('delete_last: deleted, %s back', n - i); return
+    log.info('delete_last: nothing deleted')
+
+
 def urgent_watch():
     time.sleep(30)
     try:
@@ -1267,6 +1284,8 @@ def main():
         demo_payout()
     if 'urgent' in demo:
         demo_urgent()
+    if 'delete_last' in demo:  # убрать последнее сообщение бота, например пример тревоги
+        delete_last()
     if 'selftest' in demo:  # проверка кнопок периодов и отметок срочной тревоги; с +exit бот сразу завершается, чтобы лог был виден
         selftest_buttons()
         log.info('urgent mentions: %s', 'ok' if mentions() else 'none')
