@@ -1286,8 +1286,6 @@ def main():
         demo_urgent()
     if 'delete_last' in demo:  # убрать последнее сообщение бота, например пример тревоги
         delete_last()
-    if 'once' in demo:  # разовое сообщение по просьбе группы, после отправки убирается из кода
-        tg('sendMessage', {'chat_id': CHAT_ID, 'text': 'Роман тут даже я афигел'})
     if 'selftest' in demo:  # проверка кнопок периодов и отметок срочной тревоги; с +exit бот сразу завершается, чтобы лог был виден
         selftest_buttons()
         log.info('urgent mentions: %s', 'ok' if mentions() else 'none')
