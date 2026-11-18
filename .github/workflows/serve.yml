@@ -40,18 +40,6 @@ jobs:
             echo "pip: попытка $i не удалась"; sleep 30
           done
           exit 1
-      # без Chromium бот всё равно работает (тревоги, поставки, тексты), только без картинок — поэтому не роняем запуск
-      - name: Install Chromium
-        timeout-minutes: 20
-        continue-on-error: true
-        run: |
-          for i in 1 2 3; do
-            python -m playwright install --with-deps chromium > pw.log 2>&1 && exit 0
-            echo "chromium: попытка $i не удалась"; tail -n 5 pw.log; sleep 30
-          done
-          echo "::warning::Chromium не установился: бот работает без картинок"; exit 1
-      # шрифт Inter, чтобы картинка в Telegram выглядела как макет; без него бот всё равно работает
-      - run: sudo apt-get install -y -q --no-install-recommends fonts-inter > /dev/null 2>&1 || echo "fonts-inter не установился, будет системный шрифт"
       - name: Restore state
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with: {path: state, key: "state-${{ github.run_id }}", restore-keys: "state-"}
@@ -67,7 +55,18 @@ jobs:
           DAILY_TIME: "09:00"
           SERVE_SECONDS: "20700"
           DEMO: ${{ inputs.demo }}
-        run: python bot.py
+          RENDER_READY: ${{ runner.temp }}/render-ready
+        # Chromium и шрифт Inter ставим в фоне, без секретов в окружении: бот выходит на связь сразу, а картинки
+        # ждут установку (render.py, до 3 мин). Раньше бот ждал установку до запуска, а apt иногда тормозит
+        # по 5–10 минут — всё это время на смене никого не было и команды оставались без ответа.
+        # Системные библиотеки для Chromium на раннере GitHub уже есть (там стоит Chrome), install-deps — на всякий случай.
+        run: |
+          env -u TELEGRAM_BOT_TOKEN -u OZON_API_KEY -u OZON_CLIENT_ID -u PRODUCTS_JSON -u UPD_SIGNER -u ALLOWED_CHAT_ID -u ALLOWED_USER_IDS \
+            bash -c 'for i in 1 2 3; do timeout 300 python -m playwright install chromium > pw.log 2>&1 && break; echo "chromium: попытка $i не удалась"; sleep 20; done
+                     touch "$RENDER_READY"
+                     timeout 900 python -m playwright install-deps chromium > pw-deps.log 2>&1 || echo "chromium deps: не установились"
+                     timeout 600 sudo apt-get install -y -q --no-install-recommends fonts-inter > /dev/null 2>&1 || echo "fonts-inter не установился, будет системный шрифт"' &
+          python bot.py
       - name: Save state
         if: always()
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3

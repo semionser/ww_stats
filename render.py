@@ -1,5 +1,5 @@
 """Дашборд → PNG через headless Chromium (Playwright). Страница открывается без сети."""
-import os
+import os, time
 from playwright.sync_api import sync_playwright
 
 CSS = """
@@ -14,7 +14,15 @@ svg text{font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 """
 
 
+def wait_ready(limit=180):
+    """В GitHub Actions Chromium ставится в фоне, пока бот уже на связи: картинка ждёт конца установки, до 3 минут."""
+    f, end = os.environ.get('RENDER_READY'), time.time() + limit
+    while f and not os.path.exists(f) and time.time() < end:
+        time.sleep(2)
+
+
 def to_png(fragment: str, path: str, wide: bool = False):
+    wait_ready()
     page_html = f'<!doctype html><html><head><meta charset="utf-8"><style>{CSS}</style></head><body><div id="w"{' class="wide"' if wide else ''}>{fragment}</div></body></html>'
     with sync_playwright() as p:
         b = p.chromium.launch(args=['--no-sandbox'], executable_path=os.environ.get('CHROMIUM_PATH') or None)
