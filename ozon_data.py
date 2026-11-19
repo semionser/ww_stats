@@ -2,6 +2,7 @@
 import json, os, time, datetime, collections, urllib.request, urllib.error
 
 API = 'https://api-seller.ozon.ru'
+LAST_OK = [time.time()]  # когда Ozon последний раз ответил: бот сменяет раннер, если Ozon долго молчит
 MSK = datetime.timedelta(hours=3)
 
 
@@ -27,7 +28,9 @@ def call(path, body):
         try:
             req = urllib.request.Request(API + path, data=json.dumps(body).encode(), headers=hdr, method='POST')
             with urllib.request.urlopen(req, timeout=60) as r:
-                return json.loads(r.read())
+                d = json.loads(r.read())
+            LAST_OK[0] = time.time()
+            return d
         except urllib.error.HTTPError as e:
             err = f'{e.code}'
             if e.code in (401, 403):

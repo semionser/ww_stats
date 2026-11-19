@@ -26,6 +26,7 @@ if _missing and sys.argv[1:2] != ['test']:
     sys.exit('Не заданы секреты: ' + ', '.join(_missing))
 
 import records
+import ozon_data
 from ozon_data import collect, collect_period, collect_summary, call as ozon_call, MSK, NAMES, watch, supplies, supply_states, transit_history, prices, quarantine, SUPPLY_ACTIVE
 from widget import widget_html, top_html
 from render import to_png
@@ -59,6 +60,7 @@ URGENT_REMIND = 3 * 3600       # товар всё ещё в карантине 
 COOLDOWN = 60  # сек.: чаще одного раза в минуту не дёргаем Ozon, повторяем последнюю картинку
 DAILY_TRIES, DAILY_RETRY = 6, 600   # итог за вчера: если Ozon не ответил, ещё 5 попыток раз в 10 мин
 OZON_DOWN_WARN = 3600               # Ozon не отвечает час подряд — один раз пишем в группу
+OZON_NEW_RUNNER = 20 * 60           # Ozon молчит 20 мин — заканчиваем смену раньше, следующая придёт на новом раннере
 TG_LIMIT = 4000                     # Telegram режет сообщения длиннее 4096 символов
 # Кто подписывает УПД — только из секрета UPD_SIGNER, в коде нет. Один подписант или список:
 # {"id": ..., "username": ..., "name": ...}  или  [{...}, {...}]
@@ -91,6 +93,16 @@ ME_ID = 0
 PEOPLE = None  # id людей, кто жал кнопки или звал бота в группе (в зашифрованном состоянии), — их тоже отмечаем
 
 
+def why(e):
+    """Что писать в лог об ошибке. Ошибка запроса к Ozon — путь и код ответа («Ozon API /v3/posting/fbo/list: 429»),
+    там нет данных; всё остальное — только тип, текст исключения мог бы содержать данные."""
+    m = str(e) if isinstance(e, RuntimeError) else ''
+    return m[:120] if m.startswith('Ozon API /') else type(e).__name__
+
+
+STOP = threading.Event()  # закончить смену раньше срока (job next сразу запустит следующую)
+
+
 def tg(method, data=None, files=None, timeout=70):
     url = f'https://api.telegram.org/bot{TOKEN}/{method}'
     if files:
@@ -109,7 +121,7 @@ def tg(method, data=None, files=None, timeout=70):
     except urllib.error.HTTPError as e:
         log.warning('telegram %s: HTTP %s%s', method, e.code, tg_reason(e))  # без URL: в нём токен
     except Exception as e:
-        log.warning('telegram %s: %s', method, type(e).__name__)
+        log.warning('telegram %s: %s', method, why(e))
     return None
 
 
@@ -211,7 +223,7 @@ def dashboard(final_day=None, period='now', quiet=False):
         try:
             png, cap = build(final_day, period)
         except Exception as e:
-            log.error('build failed: %s', type(e).__name__)
+            log.error('build failed: %s', why(e))
             if not quiet:
                 tg('sendMessage', {'chat_id': CHAT_ID, 'text': 'Не получилось забрать данные Ozon, попробуйте через пару минут.'})
             return None
@@ -260,7 +272,7 @@ def on_period(cq):
         try:
             records.ensure_loaded()
         except Exception as e:
-            log.error('top history: %s', type(e).__name__)
+            log.error('top history: %s', why(e))
     log.info('period button: %s', 'ok' if edit_dashboard(msg['message_id'], period) else 'failed')
 
 
@@ -503,14 +515,14 @@ def send_summary(kind, today, demo=False):
             A = collect_summary(kind, today)
             png, cap = render(A)
         except Exception as e:
-            log.error('summary failed: %s', type(e).__name__)
+            log.error('summary failed: %s', why(e))
             return False
     pd = A['period']
     try:
         records.ensure_loaded()
         lines = records.period_lines(kind, datetime.date.fromisoformat(pd['from']), datetime.date.fromisoformat(pd['to']))
     except Exception as e:
-        lines = []; log.error('records: %s', type(e).__name__)
+        lines = []; log.error('records: %s', why(e))
     if demo:
         cap = '🧪 <i>Пример: так итог придёт сам</i>\n' + cap
     ok = bool(tg('sendPhoto', {'chat_id': CHAT_ID, 'caption': cap, 'parse_mode': 'HTML'}, files={'photo': ('ozon.png', png)}))
@@ -556,7 +568,7 @@ def scheduler():
             evening(today, tries)
         check_upd()
       except Exception as e:
-        log.error('scheduler: %s', type(e).__name__)
+        log.error('scheduler: %s', why(e))
       time.sleep(30)
 
 
@@ -618,7 +630,7 @@ def evening(today, tries):
             tg('sendMessage', {'chat_id': CHAT_ID, 'text': '\n'.join(lines + [records.NOTE]), 'parse_mode': 'HTML'})
         done = True
     except Exception as e:
-        log.error('evening: %s', type(e).__name__); done = tr['n'] >= 3
+        log.error('evening: %s', why(e)); done = tr['n'] >= 3
     if done:
         with slock:
             st = load_state(); st['evening'] = today; save_state(st)
@@ -730,7 +742,7 @@ def transit_days():
             h = transit_history()
             eta_cache.update(t=time.time(), days=statistics.median(h + seen) if h + seen else 3.0)
         except Exception as e:
-            log.warning('transit history: %s', type(e).__name__)
+            log.warning('transit history: %s', why(e))
             return eta_cache['days'] or 3.0
     return eta_cache['days']
 
@@ -846,7 +858,7 @@ def send_demo_acceptance():
         s['state'], s['updated'] = 'ACCEPTANCE_AT_STORAGE_WAREHOUSE', msk_now()
         text = supplies_text(S, {s['id']: 'IN_TRANSIT'})
     except Exception as e:
-        log.error('demo failed: %s', type(e).__name__)
+        log.error('demo failed: %s', why(e))
         return
     log.info('demo message')
     send_text('🧪 <i>Пример, статус выдуман</i>\n\n' + text)
@@ -858,7 +870,7 @@ def send_supplies():
             try:
                 text = supplies_text(supplies(done_max=0))
             except Exception as e:
-                log.error('supplies failed: %s', type(e).__name__)
+                log.error('supplies failed: %s', why(e))
                 tg('sendMessage', {'chat_id': CHAT_ID, 'text': 'Не получилось забрать поставки из Ozon, попробуйте через пару минут.'})
                 return
             scache.update(t=time.time(), text=text)
@@ -885,7 +897,7 @@ def check_alerts():
     try:
         P = prices()
     except Exception as e:
-        log.warning('prices: %s', type(e).__name__); P = None
+        log.warning('prices: %s', why(e)); P = None
     with slock:
         st = load_state()
         first = 'alerts' not in st
@@ -1017,7 +1029,7 @@ def check_urgent():
     try:
         P = prices()
     except Exception as e:
-        log.warning('urgent prices: %s', type(e).__name__); P = {}
+        log.warning('urgent prices: %s', why(e)); P = {}
     new_q, still, out_q, crashes = [], [], [], []
     with slock:
         st = load_state(); u = st.get('urgent') or {}
@@ -1117,12 +1129,12 @@ def urgent_watch():
     try:
         log.info('urgent mentions: %s', 'ok' if mentions() else 'none')  # только «есть / нет», без id и числа людей
     except Exception as e:
-        log.error('mentions: %s', type(e).__name__)
+        log.error('mentions: %s', why(e))
     while True:
         try:
             check_urgent()
         except Exception as e:
-            log.error('urgent: %s', type(e).__name__)
+            log.error('urgent: %s', why(e))
         time.sleep(URGENT_EVERY)
 
 
@@ -1155,20 +1167,25 @@ def watcher():
         try:
             check_alerts()
         except Exception as e:
-            ok = False; log.error('watch: %s', type(e).__name__)
+            ok = False; log.error('watch: %s', why(e))
         try:
             check_supplies()
         except Exception as e:
-            ok = False; log.error('supplies watch: %s', type(e).__name__)
+            ok = False; log.error('supplies watch: %s', why(e))
         for f in (check_payouts,):  # не влияет на «Ozon не отвечает»: у выплат свой запрос
             try:
                 f()
             except Exception as e:
-                log.error('%s: %s', f.__name__, type(e).__name__)
+                log.error('%s: %s', f.__name__, why(e))
         try:
             ozon_health(ok)
         except Exception as e:
-            log.error('health: %s', type(e).__name__)
+            log.error('health: %s', why(e))
+        # Ozon молчит 20+ минут: бывает, что не отвечает именно этому раннеру GitHub. Заканчиваем смену,
+        # следующая стартует через секунды на другой машине. Если Ozon лёг целиком, это просто повторится.
+        if time.time() - ozon_data.LAST_OK[0] >= OZON_NEW_RUNNER:
+            log.warning('ozon silent 20 min, ending shift for a fresh runner')
+            STOP.set(); return
         time.sleep(WATCH_EVERY)
 
 
@@ -1297,7 +1314,7 @@ def main():
     log.info('bot started')  # имя бота в лог не пишем: логи Actions публичные
     off = None
     end = time.time() + SERVE_SECONDS if SERVE_SECONDS else None
-    while end is None or time.time() < end:
+    while not STOP.is_set() and (end is None or time.time() < end):
         res = tg('getUpdates', {'timeout': 50, 'offset': off, 'allowed_updates': ['message', 'my_chat_member', 'callback_query']})
         if res is None:
             time.sleep(5); continue
@@ -1306,7 +1323,7 @@ def main():
             try:
                 handle(u)
             except Exception as e:
-                log.error('handle: %s', type(e).__name__)
+                log.error('handle: %s', why(e))
     if off:
         tg('getUpdates', {'offset': off, 'timeout': 0})  # подтверждаем обработанные, чтобы следующий запуск не повторил
     time.sleep(40)  # даём дорисоваться начатым ответам
